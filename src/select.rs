@@ -184,7 +184,7 @@ impl<'a, T> Selector<'a, T> {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
-                    wait_lock(&self.sender.shared.chan)
+                    self.sender.shared.chan.lock().unwrap()
                         .sending
                         .as_mut()
                         .unwrap()
@@ -278,7 +278,7 @@ impl<'a, T> Selector<'a, T> {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
-                    wait_lock(&self.receiver.shared.chan)
+                    self.receiver.shared.chan.lock().unwrap()
                         .waiting
                         .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                     // If we were woken, but never polled, wake up another
@@ -291,7 +291,7 @@ impl<'a, T> Selector<'a, T> {
                             .2
                             .load(Ordering::SeqCst)
                     {
-                        wait_lock(&self.receiver.shared.chan).try_wake_receiver_if_pending();
+                        self.receiver.shared.chan.lock().unwrap().try_wake_receiver_if_pending();
                     }
                 }
             }

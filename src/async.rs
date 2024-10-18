@@ -156,7 +156,7 @@ impl<'a, T> SendFut<'a, T> {
     fn reset_hook(&mut self) {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
-            wait_lock(&self.sender.shared.chan).sending
+            self.sender.shared.chan.lock().unwrap().sending
                 .as_mut()
                 .unwrap().1
                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
@@ -376,7 +376,7 @@ impl<'a, T> RecvFut<'a, T> {
     fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
-            let mut chan = wait_lock(&self.receiver.shared.chan);
+            let mut chan = self.receiver.shared.chan.lock().unwrap();
             // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
             chan.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
@@ -405,7 +405,7 @@ impl<'a, T> RecvFut<'a, T> {
             if hook.update_waker(cx.waker()) {
                 // If the previous hook was awakened, we need to insert it back to the
                 // queue, otherwise, it remains valid.
-                wait_lock(&self.receiver.shared.chan)
+                self.receiver.shared.chan.lock().unwrap()
                     .waiting
                     .push_back(hook);
             }

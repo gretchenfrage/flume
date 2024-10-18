@@ -338,12 +338,6 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
-
-#[inline]
-fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
-    lock.lock().unwrap()
-}
-
 type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
 
 struct Chan<T> {
@@ -404,7 +398,7 @@ impl<T> Shared<T> {
         make_signal: impl FnOnce(T) -> Arc<Hook<T, S>>,
         do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
     ) -> R {
-        let mut chan = wait_lock(&self.chan);
+        let mut chan = self.chan.lock().unwrap();
 
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
@@ -476,7 +470,7 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn signal::Signal>> = hook.clone();
-                            wait_lock(&self.chan).sending
+                            self.chan.lock().unwrap().sending
                                 .as_mut()
                                 .unwrap().1
                                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
@@ -505,7 +499,7 @@ impl<T> Shared<T> {
         make_signal: impl FnOnce() -> Arc<Hook<T, S>>,
         do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
     ) -> R {
-        let mut chan = wait_lock(&self.chan);
+        let mut chan = self.chan.lock().unwrap();
         chan.pull_pending(true);
 
         if let Some(msg) = chan.queue.pop_front() {
@@ -538,14 +532,14 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
-                            wait_lock(&self.chan).waiting
+                            self.chan.lock().unwrap().waiting
                                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                         }
                         match hook.try_take() {
                             Some(msg) => Ok(msg),
                             None => {
                                 let disconnected = self.is_disconnected(); // Check disconnect *before* msg
-                                if let Some(msg) = wait_lock(&self.chan).queue.pop_front() {
+                                if let Some(msg) = self.chan.lock().unwrap().queue.pop_front() {
                                     Ok(msg)
                                 } else if disconnected {
                                     Err(TryRecvTimeoutError::Disconnected)
@@ -557,7 +551,7 @@ impl<T> Shared<T> {
                     })
             } else {
                 hook.wait_recv(&self.disconnected)
-                    .or_else(|| wait_lock(&self.chan).queue.pop_front())
+                    .or_else(|| self.chan.lock().unwrap().queue.pop_front())
                     .ok_or(TryRecvTimeoutError::Disconnected)
             },
         )
@@ -568,7 +562,7 @@ impl<T> Shared<T> {
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
 
-        let mut chan = wait_lock(&self.chan);
+        let mut chan = self.chan.lock().unwrap();
         chan.pull_pending(false);
         if let Some((_, sending)) = chan.sending.as_ref() {
             sending.iter().for_each(|hook| {
@@ -593,13 +587,13 @@ impl<T> Shared<T> {
     }
 
     fn len(&self) -> usize {
-        let mut chan = wait_lock(&self.chan);
+        let mut chan = self.chan.lock().unwrap();
         chan.pull_pending(false);
         chan.queue.len()
     }
 
     fn capacity(&self) -> Option<usize> {
-        wait_lock(&self.chan).sending.as_ref().map(|(cap, _)| *cap)
+        self.chan.lock().unwrap().sending.as_ref().map(|(cap, _)| *cap)
     }
 
     fn sender_count(&self) -> usize {
@@ -855,7 +849,7 @@ impl<T> Receiver<T> {
     /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
     /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
-        let mut chan = wait_lock(&self.shared.chan);
+        let mut chan = self.shared.chan.lock().unwrap();
         chan.pull_pending(false);
         let queue = std::mem::take(&mut chan.queue);
 
