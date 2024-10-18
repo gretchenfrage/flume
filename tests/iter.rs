@@ -2,8 +2,8 @@
 
 extern crate crossbeam_utils;
 
-use crossbeam_utils::thread::scope;
 use flume::unbounded;
+use crossbeam_utils::thread::scope;
 
 #[test]
 fn nested_recv_iter() {
