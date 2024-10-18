@@ -416,15 +416,11 @@ impl<T> Shared<T> {
     }
 }
 
-/// A transmitting end of a channel.
 pub struct Sender<T> {
     shared: Arc<Shared<T>>,
 }
 
 impl<T> Sender<T> {
-    /// Attempt to send a value into the channel. If the channel is bounded and full, or all
-    /// receivers have been dropped, an error is returned. If the channel associated with this
-    /// sender is unbounded, this method has the same behaviour as [`Sender::send`].
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         self.shared.send_sync(msg, None).map_err(|err| match err {
             TrySendTimeoutError::Full(msg) => TrySendError::Full(msg),
@@ -433,10 +429,6 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if all receivers have been dropped.
-    /// If the channel is bounded and is full, this method will block until space is available
-    /// or all receivers have been dropped. If the channel is unbounded, this method will not
-    /// block.
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
         self.shared.send_sync(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
@@ -444,10 +436,6 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if all receivers have been dropped
-    /// or the deadline has passed. If the channel is bounded and is full, this method will
-    /// block until space is available, the deadline is reached, or all receivers have been
-    /// dropped.
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
         self.shared.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
@@ -456,74 +444,50 @@ impl<T> Sender<T> {
         })
     }
 
-    /// Send a value into the channel, returning an error if all receivers have been dropped
-    /// or the timeout has expired. If the channel is bounded and is full, this method will
-    /// block until space is available, the timeout has expired, or all receivers have been
-    /// dropped.
     pub fn send_timeout(&self, msg: T, dur: Duration) -> Result<(), SendTimeoutError<T>> {
         self.send_deadline(msg, Instant::now().checked_add(dur).unwrap())
     }
 
-    /// Returns true if all receivers for this channel have been dropped.
     pub fn is_disconnected(&self) -> bool {
         self.shared.is_disconnected()
     }
 
-    /// Returns true if the channel is empty.
-    /// Note: Zero-capacity channels are always empty.
     pub fn is_empty(&self) -> bool {
         self.shared.is_empty()
     }
 
-    /// Returns true if the channel is full.
-    /// Note: Zero-capacity channels are always full.
     pub fn is_full(&self) -> bool {
         self.shared.is_full()
     }
 
-    /// Returns the number of messages in the channel
     pub fn len(&self) -> usize {
         self.shared.len()
     }
 
-    /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
         self.shared.capacity()
     }
 
-    /// Get the number of senders that currently exist, including this one.
     pub fn sender_count(&self) -> usize {
         self.shared.sender_count()
     }
 
-    /// Get the number of receivers that currently exist.
-    ///
-    /// Note that this method makes no guarantees that a subsequent send will succeed; it's
-    /// possible that between `receiver_count()` being called and a `send()`, all open receivers
-    /// could drop.
     pub fn receiver_count(&self) -> usize {
         self.shared.receiver_count()
     }
 
-    /// Creates a [`WeakSender`] that does not keep the channel open.
-    ///
-    /// The channel is closed once all `Sender`s are dropped, even if there
-    /// are still active `WeakSender`s.
     pub fn downgrade(&self) -> WeakSender<T> {
         WeakSender {
             shared: Arc::downgrade(&self.shared),
         }
     }
 
-    /// Returns whether the senders are belong to the same channel.
     pub fn same_channel(&self, other: &Sender<T>) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 }
 
 impl<T> Clone for Sender<T> {
-    /// Clone this sender. [`Sender`] acts as a handle to the ending a channel. Remaining channel
-    /// contents will only be cleaned up when all senders and the receiver have been dropped.
     fn clone(&self) -> Self {
         self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }
@@ -545,23 +509,11 @@ impl<T> Drop for Sender<T> {
     }
 }
 
-/// A sender that does not prevent the channel from being closed.
-///
-/// Weak senders do not count towards the number of active senders on the channel. As soon as
-/// all normal [`Sender`]s are dropped, the channel is closed, even if there is still a
-/// `WeakSender`.
-///
-/// To send messages, a `WeakSender` must first be upgraded to a `Sender` using the [`upgrade`]
-/// method.
 pub struct WeakSender<T> {
     shared: Weak<Shared<T>>,
 }
 
 impl<T> WeakSender<T> {
-    /// Tries to upgrade the `WeakSender` to a [`Sender`], in order to send messages.
-    ///
-    /// Returns `None` if the channel was closed already. Note that a `Some` return value
-    /// does not guarantee that the channel is still open.
     pub fn upgrade(&self) -> Option<Sender<T>> {
         self.shared
             .upgrade()
@@ -591,24 +543,16 @@ impl<T> fmt::Debug for WeakSender<T> {
 }
 
 impl<T> Clone for WeakSender<T> {
-    /// Clones this [`WeakSender`].
     fn clone(&self) -> Self {
         Self { shared: self.shared.clone() }
     }
 }
 
-/// The receiving end of a channel.
-///
-/// Note: Cloning the receiver *does not* turn this channel into a broadcast channel.
-/// Each message will only be received by a single receiver. This is useful for
-/// implementing work stealing for concurrent programs.
 pub struct Receiver<T> {
     shared: Arc<Shared<T>>,
 }
 
 impl<T> Receiver<T> {
-    /// Attempt to fetch an incoming value from the channel associated with this receiver,
-    /// returning an error if the channel is empty or if all senders have been dropped.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.shared.recv_sync(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
@@ -617,8 +561,6 @@ impl<T> Receiver<T> {
         })
     }
 
-    /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all senders have been dropped.
     pub fn recv(&self) -> Result<T, RecvError> {
         self.shared.recv_sync(Some(None)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
@@ -626,8 +568,6 @@ impl<T> Receiver<T> {
         })
     }
 
-    /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all senders have been dropped or the deadline has passed.
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
         self.shared.recv_sync(Some(Some(deadline))).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
@@ -636,29 +576,18 @@ impl<T> Receiver<T> {
         })
     }
 
-    /// Wait for an incoming value from the channel associated with this receiver, returning an
-    /// error if all senders have been dropped or the timeout has expired.
     pub fn recv_timeout(&self, dur: Duration) -> Result<T, RecvTimeoutError> {
         self.recv_deadline(Instant::now().checked_add(dur).unwrap())
     }
 
-    /// Create a blocking iterator over the values received on the channel that finishes iteration
-    /// when all senders have been dropped.
-    ///
-    /// You can also create a self-owned iterator with [`Receiver::into_iter`].
     pub fn iter(&self) -> Iter<T> {
         Iter { receiver: &self }
     }
 
-    /// A non-blocking iterator over the values received on the channel that finishes iteration
-    /// when all senders have been dropped or the channel is empty.
     pub fn try_iter(&self) -> TryIter<T> {
         TryIter { receiver: &self }
     }
 
-    /// Take all msgs currently sitting in the channel and produce an iterator over them. Unlike
-    /// `try_iter`, the iterator will not attempt to fetch any more values from the channel once
-    /// the function has been called.
     pub fn drain(&self) -> Drain<T> {
         let mut chan = self.shared.chan.lock().unwrap();
         chan.pull_pending(false);
@@ -667,57 +596,40 @@ impl<T> Receiver<T> {
         Drain { queue, _phantom: PhantomData }
     }
 
-    /// Returns true if all senders for this channel have been dropped.
     pub fn is_disconnected(&self) -> bool {
         self.shared.is_disconnected()
     }
 
-    /// Returns true if the channel is empty.
-    /// Note: Zero-capacity channels are always empty.
     pub fn is_empty(&self) -> bool {
         self.shared.is_empty()
     }
 
-    /// Returns true if the channel is full.
-    /// Note: Zero-capacity channels are always full.
     pub fn is_full(&self) -> bool {
         self.shared.is_full()
     }
 
-    /// Returns the number of messages in the channel.
     pub fn len(&self) -> usize {
         self.shared.len()
     }
 
-    /// If the channel is bounded, returns its capacity.
     pub fn capacity(&self) -> Option<usize> {
         self.shared.capacity()
     }
 
-    /// Get the number of senders that currently exist.
     pub fn sender_count(&self) -> usize {
         self.shared.sender_count()
     }
 
-    /// Get the number of receivers that currently exist, including this one.
     pub fn receiver_count(&self) -> usize {
         self.shared.receiver_count()
     }
 
-    /// Returns whether the receivers are belong to the same channel.
     pub fn same_channel(&self, other: &Receiver<T>) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 }
 
 impl<T> Clone for Receiver<T> {
-    /// Clone this receiver. [`Receiver`] acts as a handle to the ending a channel. Remaining
-    /// channel contents will only be cleaned up when all senders and the receiver have been
-    /// dropped.
-    ///
-    /// Note: Cloning the receiver *does not* turn this channel into a broadcast channel.
-    /// Each message will only be received by a single receiver. This is useful for
-    /// implementing work stealing for concurrent programs.
     fn clone(&self) -> Self {
         self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self { shared: self.shared.clone() }
@@ -740,20 +652,6 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
-/// Create a channel with no maximum capacity.
-///
-/// Create an unbounded channel with a [`Sender`] and [`Receiver`] connected to each end respectively. Values sent in
-/// one end of the channel will be received on the other end. The channel is thread-safe, and both [`Sender`] and
-/// [`Receiver`] may be sent to or shared between threads as necessary. In addition, both [`Sender`] and [`Receiver`]
-/// may be cloned.
-///
-/// # Examples
-/// ```
-/// let (tx, rx) = flume::unbounded();
-///
-/// tx.send(42).unwrap();
-/// assert_eq!(rx.recv().unwrap(), 42);
-/// ```
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(None));
     (
@@ -762,33 +660,6 @@ pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     )
 }
 
-/// Create a channel with a maximum capacity.
-///
-/// Create a bounded channel with a [`Sender`] and [`Receiver`] connected to each end respectively. Values sent in one
-/// end of the channel will be received on the other end. The channel is thread-safe, and both [`Sender`] and
-/// [`Receiver`] may be sent to or shared between threads as necessary. In addition, both [`Sender`] and [`Receiver`]
-/// may be cloned.
-///
-/// Unlike an [`unbounded`] channel, if there is no space left for new messages, calls to
-/// [`Sender::send`] will block (unblocking once a receiver has made space). If blocking behaviour
-/// is not desired, [`Sender::try_send`] may be used.
-///
-/// Like `std::sync::mpsc`, `flume` supports 'rendezvous' channels. A bounded queue with a maximum capacity of zero
-/// will block senders until a receiver is available to take the value. You can imagine a rendezvous channel as a
-/// ['Glienicke Bridge'](https://en.wikipedia.org/wiki/Glienicke_Bridge)-style location at which senders and receivers
-/// perform a handshake and transfer ownership of a value.
-///
-/// # Examples
-/// ```
-/// let (tx, rx) = flume::bounded(32);
-///
-/// for i in 1..33 {
-///     tx.send(i).unwrap();
-/// }
-/// assert!(tx.try_send(33).is_err());
-///
-/// assert_eq!(rx.try_iter().sum::<u32>(), (1..33).sum());
-/// ```
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(Some(cap)));
     (
