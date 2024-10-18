@@ -5,11 +5,13 @@ pub mod r#async;
 mod signal;
 mod error;
 mod iterator;
+mod weak;
 
 // Reexports
 pub use select::Selector;
 pub use self::error::*;
 pub use self::iterator::*;
+pub use self::weak::*;
 
 use std::{
     collections::VecDeque,
@@ -34,6 +36,30 @@ enum TryRecvTimeoutError {
 }
 
 struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
+
+type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
+
+struct Chan<T> {
+    sending: Option<(usize, SignalVec<T>)>,
+    queue: VecDeque<T>,
+    waiting: SignalVec<T>,
+}
+
+struct Shared<T> {
+    chan: Mutex<Chan<T>>,
+    disconnected: AtomicBool,
+    sender_count: AtomicUsize,
+    receiver_count: AtomicUsize,
+}
+
+pub struct Sender<T> {
+    shared: Arc<Shared<T>>,
+}
+
+pub struct Receiver<T> {
+    shared: Arc<Shared<T>>,
+}
+
 
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
@@ -149,14 +175,6 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
-type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
-
-struct Chan<T> {
-    sending: Option<(usize, SignalVec<T>)>,
-    queue: VecDeque<T>,
-    waiting: SignalVec<T>,
-}
-
 impl<T> Chan<T> {
     fn pull_pending(&mut self, pull_extra: bool) {
         if let Some((cap, sending)) = &mut self.sending {
@@ -179,13 +197,6 @@ impl<T> Chan<T> {
             while Some(false) == self.waiting.pop_front().map(|s| s.fire_nothing()) {}
         }
     }
-}
-
-struct Shared<T> {
-    chan: Mutex<Chan<T>>,
-    disconnected: AtomicBool,
-    sender_count: AtomicUsize,
-    receiver_count: AtomicUsize,
 }
 
 impl<T> Shared<T> {
@@ -416,10 +427,6 @@ impl<T> Shared<T> {
     }
 }
 
-pub struct Sender<T> {
-    shared: Arc<Shared<T>>,
-}
-
 impl<T> Sender<T> {
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
         self.shared.send_sync(msg, None).map_err(|err| match err {
@@ -507,49 +514,6 @@ impl<T> Drop for Sender<T> {
             self.shared.disconnect_all();
         }
     }
-}
-
-pub struct WeakSender<T> {
-    shared: Weak<Shared<T>>,
-}
-
-impl<T> WeakSender<T> {
-    pub fn upgrade(&self) -> Option<Sender<T>> {
-        self.shared
-            .upgrade()
-            // check that there are still live senders
-            .filter(|shared| {
-                shared
-                    .sender_count
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        if count == 0 {
-                            // all senders are closed already -> don't increase the sender count
-                            None
-                        } else {
-                            // there is still at least one active sender
-                            Some(count + 1)
-                        }
-                    })
-                    .is_ok()
-            })
-            .map(|shared| Sender { shared })
-    }
-}
-
-impl<T> fmt::Debug for WeakSender<T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WeakSender").finish()
-    }
-}
-
-impl<T> Clone for WeakSender<T> {
-    fn clone(&self) -> Self {
-        Self { shared: self.shared.clone() }
-    }
-}
-
-pub struct Receiver<T> {
-    shared: Arc<Shared<T>>,
 }
 
 impl<T> Receiver<T> {
