@@ -309,7 +309,6 @@ fn robin() {
     }
 }
 
-#[cfg(feature = "select")]
 #[test]
 fn select_general() {
     #[derive(Debug, PartialEq)]

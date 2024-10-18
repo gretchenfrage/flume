@@ -1,13 +1,10 @@
 
-#[cfg(feature = "select")]
 pub mod select;
-#[cfg(feature = "async")]
 pub mod r#async;
 
 mod signal;
 
 // Reexports
-#[cfg(feature = "select")]
 pub use select::Selector;
 
 use std::{

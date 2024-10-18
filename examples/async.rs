@@ -1,4 +1,4 @@
-#[cfg(all(feature = "async", not(target_os = "unknown")))]
+#[cfg(not(target_os = "unknown"))]
 #[async_std::main]
 async fn main() {
     let (tx, rx) = flume::bounded(1);
@@ -17,5 +17,5 @@ async fn main() {
     t.await;
 }
 
-#[cfg(any(not(feature = "async"), target_os = "unknown"))]
+#[cfg(target_os = "unknown")]
 fn main() {}

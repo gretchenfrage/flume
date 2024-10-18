@@ -24,7 +24,6 @@ fn same_receiver() {
     assert!(!rx2.same_channel(&rx3));
 }
 
-#[cfg(feature = "async")]
 #[test]
 fn same_send_sink() {
     let (tx1, _rx) = flume::unbounded::<()>();
@@ -40,7 +39,6 @@ fn same_send_sink() {
     assert!(!tx2.same_channel(&tx3));
 }
 
-#[cfg(feature = "async")]
 #[test]
 fn same_recv_stream() {
     let (_tx, rx1) = flume::unbounded::<()>();

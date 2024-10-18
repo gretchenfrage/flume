@@ -1,7 +1,5 @@
-#[cfg(feature = "select")]
 use flume::Selector;
 
-#[cfg(feature = "select")]
 fn main() {
     // Create two channels
     let (red_tx, red_rx) = flume::unbounded();
@@ -20,6 +18,3 @@ fn main() {
 
     println!("{} won!", winner);
 }
-
-#[cfg(not(feature = "select"))]
-fn main() {}

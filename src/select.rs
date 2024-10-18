@@ -4,7 +4,6 @@ use crate::*;
 use spin1::Mutex as Spinlock;
 use std::{any::Any, marker::PhantomData};
 
-#[cfg(feature = "eventual-fairness")]
 use nanorand::Rng;
 
 // A unique token corresponding to an event in a selector
@@ -80,7 +79,6 @@ pub struct Selector<'a, T: 'a> {
     selections: Vec<Box<dyn Selection<'a, T> + 'a>>,
     next_poll: usize,
     signalled: Arc<Spinlock<VecDeque<Token>>>,
-    #[cfg(feature = "eventual-fairness")]
     rng: nanorand::WyRand,
     phantom: PhantomData<*const ()>,
 }
@@ -105,7 +103,6 @@ impl<'a, T> Selector<'a, T> {
             next_poll: 0,
             signalled: Arc::default(),
             phantom: PhantomData::default(),
-            #[cfg(feature = "eventual-fairness")]
             rng: nanorand::WyRand::new(),
         }
     }
@@ -318,7 +315,6 @@ impl<'a, T> Selector<'a, T> {
     }
 
     fn wait_inner(mut self, deadline: Option<Instant>) -> Option<T> {
-        #[cfg(feature = "eventual-fairness")]
         {
             self.next_poll = self.rng.generate_range(0..self.selections.len());
         }
@@ -382,23 +378,21 @@ impl<'a, T> Selector<'a, T> {
         None
     }
 
-    /// Wait until one of the events associated with this [`Selector`] has completed. If the `eventual-fairness`
-    /// feature flag is enabled, this method is fair and will handle a random event of those that are ready.
+    /// Wait until one of the events associated with this [`Selector`] has completed. This method is fair and will
+    /// handle a random event of those that are ready.
     pub fn wait(self) -> T {
         self.wait_inner(None).unwrap()
     }
 
-    /// Wait until one of the events associated with this [`Selector`] has completed or the timeout has expired. If the
-    /// `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those that
-    /// are ready.
+    /// Wait until one of the events associated with this [`Selector`] has completed or the timeout has expired. This
+    /// method is fair and will handle a random event of those that are ready.
     pub fn wait_timeout(self, dur: Duration) -> Result<T, SelectError> {
         self.wait_inner(Some(Instant::now() + dur))
             .ok_or(SelectError::Timeout)
     }
 
     /// Wait until one of the events associated with this [`Selector`] has completed or the deadline has been reached.
-    /// If the `eventual-fairness` feature flag is enabled, this method is fair and will handle a random event of those
-    /// that are ready.
+    /// This method is fair and will handle a random event of those that are ready.
     pub fn wait_deadline(self, deadline: Instant) -> Result<T, SelectError> {
         self.wait_inner(Some(deadline)).ok_or(SelectError::Timeout)
     }
