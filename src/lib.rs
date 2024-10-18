@@ -9,13 +9,12 @@ pub use select::Selector;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Weak},
+    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Weak, Mutex, MutexGuard},
     time::{Duration, Instant},
     marker::PhantomData,
     thread,
-    fmt,
+    fmt::{self, Formatter},
 };
-use std::fmt::Formatter;
 use crate::signal::{Signal, SyncSignal};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender when
@@ -345,12 +344,8 @@ fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     lock.lock().unwrap()
 }
 
-use std::sync::{Mutex, MutexGuard};
-
-type ChanLock<T> = Mutex<T>;
-
-
 type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
+
 struct Chan<T> {
     sending: Option<(usize, SignalVec<T>)>,
     queue: VecDeque<T>,
@@ -382,7 +377,7 @@ impl<T> Chan<T> {
 }
 
 struct Shared<T> {
-    chan: ChanLock<Chan<T>>,
+    chan: Mutex<Chan<T>>,
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
     receiver_count: AtomicUsize,
@@ -391,7 +386,7 @@ struct Shared<T> {
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
-            chan: ChanLock::new(Chan {
+            chan: Mutex::new(Chan {
                 sending: cap.map(|cap| (cap, VecDeque::new())),
                 queue: VecDeque::new(),
                 waiting: VecDeque::new(),

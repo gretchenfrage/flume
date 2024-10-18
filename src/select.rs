@@ -6,14 +6,11 @@ use std::{any::Any, marker::PhantomData};
 
 use nanorand::Rng;
 
-// A unique token corresponding to an event in a selector
-type Token = usize;
-
 struct SelectSignal(
     thread::Thread,
-    Token,
+    usize, // "a unique token corresponding to an event in a selector""
     AtomicBool,
-    Arc<Spinlock<VecDeque<Token>>>,
+    Arc<Spinlock<VecDeque<usize>>>, // the usize here is also tokens
 );
 
 impl Signal for SelectSignal {
@@ -78,7 +75,7 @@ impl std::error::Error for SelectError {}
 pub struct Selector<'a, T: 'a> {
     selections: Vec<Box<dyn Selection<'a, T> + 'a>>,
     next_poll: usize,
-    signalled: Arc<Spinlock<VecDeque<Token>>>,
+    signalled: Arc<Spinlock<VecDeque<usize>>>,
     rng: nanorand::WyRand,
     phantom: PhantomData<*const ()>,
 }
@@ -119,8 +116,8 @@ impl<'a, T> Selector<'a, T> {
         struct SendSelection<'a, T, F, U> {
             sender: &'a Sender<U>,
             msg: Option<U>,
-            token: Token,
-            signalled: Arc<Spinlock<VecDeque<Token>>>,
+            token: usize,
+            signalled: Arc<Spinlock<VecDeque<usize>>>,
             hook: Option<Arc<Hook<U, SelectSignal>>>,
             mapper: F,
             phantom: PhantomData<T>,
@@ -221,8 +218,8 @@ impl<'a, T> Selector<'a, T> {
     ) -> Self {
         struct RecvSelection<'a, T, F, U> {
             receiver: &'a Receiver<U>,
-            token: Token,
-            signalled: Arc<Spinlock<VecDeque<Token>>>,
+            token: usize,
+            signalled: Arc<Spinlock<VecDeque<usize>>>,
             hook: Option<Arc<Hook<U, SelectSignal>>>,
             mapper: F,
             received: bool,
