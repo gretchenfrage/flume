@@ -1,32 +1,3 @@
-//! # Flume
-//!
-//! A blazingly fast multi-producer, multi-consumer channel.
-//!
-//! *"Do not communicate by sharing memory; instead, share memory by communicating."*
-//!
-//! ## Why Flume?
-//!
-//! - **Featureful**: Unbounded, bounded and rendezvous queues
-//! - **Fast**: Always faster than `std::sync::mpsc` and sometimes `crossbeam-channel`
-//! - **Safe**: No `unsafe` code anywhere in the codebase!
-//! - **Flexible**: `Sender` and `Receiver` both implement `Send + Sync + Clone`
-//! - **Familiar**: Drop-in replacement for `std::sync::mpsc`
-//! - **Capable**: Additional features like MPMC support and send timeouts/deadlines
-//! - **Simple**: Few dependencies, minimal codebase, fast to compile
-//! - **Asynchronous**: `async` support, including mix 'n match with sync code
-//! - **Ergonomic**: Powerful `select`-like interface
-//!
-//! ## Example
-//!
-//! ```
-//! let (tx, rx) = flume::unbounded();
-//!
-//! tx.send(42).unwrap();
-//! assert_eq!(rx.recv().unwrap(), 42);
-//! ```
-
-#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-#![deny(missing_docs)]
 
 #[cfg(feature = "select")]
 pub mod select;
@@ -48,8 +19,6 @@ use std::{
     fmt,
 };
 use std::fmt::Formatter;
-#[cfg(feature = "spin")]
-use spin1::{Mutex as Spinlock, MutexGuard as SpinlockGuard};
 use crate::signal::{Signal, SyncSignal};
 
 /// An error that may be emitted when attempting to send a value into a channel on a sender when
@@ -257,28 +226,8 @@ enum TryRecvTimeoutError {
     Disconnected,
 }
 
-// TODO: Investigate some sort of invalidation flag for timeouts
-#[cfg(feature = "spin")]
-struct Hook<T, S: ?Sized>(Option<Spinlock<Option<T>>>, S);
-
-#[cfg(not(feature = "spin"))]
 struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
 
-#[cfg(feature = "spin")]
-impl<T, S: ?Sized + Signal> Hook<T, S> {
-    pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
-    where
-        S: Sized,
-    {
-        Arc::new(Self(Some(Spinlock::new(msg)), signal))
-    }
-
-    fn lock(&self) -> Option<SpinlockGuard<'_, Option<T>>> {
-        self.0.as_ref().map(|s| s.lock())
-    }
-}
-
-#[cfg(not(feature = "spin"))]
 impl<T, S: ?Sized + Signal> Hook<T, S> {
     pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
     where
@@ -393,43 +342,14 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
-#[cfg(feature = "spin")]
-#[inline]
-fn wait_lock<T>(lock: &Spinlock<T>) -> SpinlockGuard<T> {
-    // Some targets don't support `thread::sleep` (e.g. the `wasm32-unknown-unknown` target when
-    // running in the main thread of a web browser) so we only use it on targets where we know it
-    // will work
-    #[cfg(any(target_family = "unix", target_family = "windows"))]
-    {
-        let mut i = 4;
-        loop {
-            for _ in 0..10 {
-                if let Some(guard) = lock.try_lock() {
-                    return guard;
-                }
-                thread::yield_now();
-            }
-            // Sleep for at most ~1 ms
-            thread::sleep(Duration::from_nanos(1 << i.min(20)));
-            i += 1;
-        }
-    }
-    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
-    lock.lock()
-}
 
-#[cfg(not(feature = "spin"))]
 #[inline]
 fn wait_lock<'a, T>(lock: &'a Mutex<T>) -> MutexGuard<'a, T> {
     lock.lock().unwrap()
 }
 
-#[cfg(not(feature = "spin"))]
 use std::sync::{Mutex, MutexGuard};
 
-#[cfg(feature = "spin")]
-type ChanLock<T> = Spinlock<T>;
-#[cfg(not(feature = "spin"))]
 type ChanLock<T> = Mutex<T>;
 
 

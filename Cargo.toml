@@ -20,8 +20,6 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-# Use a spinlock internally (may be faster on some platforms)
-spin = []
 select = []
 async = ["futures-sink", "futures-core"]
 eventual-fairness = ["select", "nanorand"]
