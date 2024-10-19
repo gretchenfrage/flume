@@ -120,7 +120,9 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
 }
 
 impl<T> Hook<T, SyncSignal> {
-    pub fn wait_recv(&self, abort: &AtomicBool) -> Option<T> {
+    /// repeatedly park the thread on the signal until a message can be taken from the slot or
+    /// `abort` indicates that the channel is disconnected
+    fn wait_recv(&self, abort: &AtomicBool) -> Option<T> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
             let msg = self.take();
@@ -134,12 +136,11 @@ impl<T> Hook<T, SyncSignal> {
         }
     }
 
-    // Err(true) if timeout
-    pub fn wait_deadline_recv(&self, abort: &AtomicBool, deadline: Instant) -> Result<T, bool> {
+    /// like `wait_recv` but with timeout. returns `Err(true)` if timeout
+    fn wait_deadline_recv(&self, abort: &AtomicBool, deadline: Instant) -> Result<T, bool> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            let msg = self.take();
-            if let Some(msg) = msg {
+            if let Some(msg) = self.take() {
                 break Ok(msg);
             } else if disconnected {
                 break Err(false);
@@ -151,19 +152,20 @@ impl<T> Hook<T, SyncSignal> {
         }
     }
 
-    pub fn wait_send(&self, abort: &AtomicBool) {
+    /// repeatedly park the thread on the signal until `self.is_empty()` or `abort` indicates that
+    /// the channel is disconnected
+    fn wait_send(&self, abort: &AtomicBool) {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
             if disconnected || self.is_empty() {
                 break;
             }
-
             self.signal().wait();
         }
     }
 
-    // Err(true) if timeout
-    pub fn wait_deadline_send(&self, abort: &AtomicBool, deadline: Instant) -> Result<(), bool> {
+    /// like `wait_send` but with timeout. returns `Err(true)` if timeout
+    fn wait_deadline_send(&self, abort: &AtomicBool, deadline: Instant) -> Result<(), bool> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
             if self.is_empty() {
@@ -180,6 +182,9 @@ impl<T> Hook<T, SyncSignal> {
 }
 
 impl<T> Lockable<T> {
+    /// pop and resolve as many hooks in `send_waiting` as possible, by moving their message to
+    /// the queue and notifying their signals. if `pull_extra` is true, the queue is allowed to
+    /// have one more message than its capacity.
     fn pull_pending(&mut self, pull_extra: bool) {
         if let Some(send_waiting) = &mut self.send_waiting {
             let effective_cap = send_waiting.cap + pull_extra as usize;
@@ -196,6 +201,8 @@ impl<T> Lockable<T> {
         }
     }
 
+    /// if the queue is non-empty, pop and notify a hook from `recv_waiting` if able. if the hook
+    /// contained a stream signal, try to pop and notify more until one isn't.
     fn try_wake_receiver_if_pending(&mut self) {
         if !self.queue.is_empty() {
             while Some(false) == self.recv_waiting.pop_front().map(|s| s.signal().fire()) {}
@@ -204,12 +211,16 @@ impl<T> Lockable<T> {
 }
 
 impl<T> Shared<T> {
+    /// construct
     fn new(cap: Option<usize>) -> Self {
         Self {
             lockable: Mutex::new(Lockable {
-                send_waiting: cap.map(|cap| SendWaiting { cap, signals: VecDeque::new() }),
-                queue: VecDeque::new(),
-                recv_waiting: VecDeque::new(),
+                send_waiting: cap.map(|cap| SendWaiting {
+                    cap,
+                    signals: Default::default(),
+                }),
+                queue: Default::default(),
+                recv_waiting: Default::default(),
             }),
             disconnected: AtomicBool::new(false),
             send_count: AtomicUsize::new(1),
