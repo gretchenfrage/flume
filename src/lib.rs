@@ -35,7 +35,10 @@ enum TryRecvTimeoutError {
     Disconnected,
 }
 
-struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
+struct Hook<T, S: ?Sized> {
+    slot: Option<Mutex<Option<T>>>,
+    signal: S
+}
 
 type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
 
@@ -62,11 +65,11 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     where
         S: Sized,
     {
-        Arc::new(Self(Some(Mutex::new(msg)), signal))
+        Arc::new(Self { slot: Some(Mutex::new(msg)), signal })
     }
 
     fn lock(&self) -> Option<MutexGuard<'_, Option<T>>> {
-        self.0.as_ref().map(|s| s.lock().unwrap())
+        self.slot.as_ref().map(|s| s.lock().unwrap())
     }
 }
 
@@ -99,11 +102,11 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     where
         S: Sized,
     {
-        Arc::new(Self(None, signal))
+        Arc::new(Self { slot: None, signal })
     }
 
     pub fn signal(&self) -> &S {
-        &self.1
+        &self.signal
     }
 
     pub fn fire_nothing(&self) -> bool {

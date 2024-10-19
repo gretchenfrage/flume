@@ -10,6 +10,8 @@ pub trait Signal: Send + Sync + 'static {
     fn as_ptr(&self) -> *const ();
 }
 
+
+// signal for blocking
 pub struct SyncSignal(Thread);
 
 impl Default for SyncSignal {

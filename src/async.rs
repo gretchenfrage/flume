@@ -44,8 +44,8 @@ impl<T> Hook<T, AsyncSignal> {
     // Update the hook to point to the given Waker.
     // Returns whether the hook has been previously awakened
     fn update_waker(&self, cx_waker: &Waker) -> bool {
-        let mut waker = self.1.waker.lock();
-        let woken = self.1.woken.load(Ordering::SeqCst);
+        let mut waker = self.signal.waker.lock();
+        let woken = self.signal.woken.load(Ordering::SeqCst);
         if !waker.will_wake(cx_waker) {
             *waker = cx_waker.clone();
 
