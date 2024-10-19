@@ -1,7 +1,6 @@
-#[cfg(feature = "async")]
+
 use flume::*;
 
-#[cfg(feature = "async")]
 #[async_std::test]
 async fn sender() {
     let (sender, receiver) = bounded(1);

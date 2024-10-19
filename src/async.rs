@@ -37,15 +37,14 @@ impl Signal for AsyncSignal {
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
-    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
 
 impl<T> Hook<T, AsyncSignal> {
     // Update the hook to point to the given Waker.
     // Returns whether the hook has been previously awakened
     fn update_waker(&self, cx_waker: &Waker) -> bool {
-        let mut waker = self.1.waker.lock();
-        let woken = self.1.woken.load(Ordering::SeqCst);
+        let mut waker = self.signal().waker.lock();
+        let woken = self.signal().woken.load(Ordering::SeqCst);
         if !waker.will_wake(cx_waker) {
             *waker = cx_waker.clone();
 
@@ -129,13 +128,12 @@ impl<T> Sender<T> {
 
 enum SendState<T> {
     NotYetSent(T),
-    QueuedItem(Arc<Hook<T, AsyncSignal>>),
+    QueuedItem(Hook<T, AsyncSignal>),
 }
 
 /// A future that sends a value into a channel.
 ///
 /// Can be created via [`Sender::send_async`] or [`Sender::into_send_async`].
-#[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
 pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
@@ -155,11 +153,7 @@ impl<'a, T> SendFut<'a, T> {
     /// on drop and just before `start_send` in the `Sink` implementation.
     fn reset_hook(&mut self) {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
-            let hook: Arc<Hook<T, dyn Signal>> = hook;
-            wait_lock(&self.sender.shared.chan).sending
-                .as_mut()
-                .unwrap().1
-                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+            self.sender.0.lockable.lock().unwrap().remove_send_hook(&hook);
         }
     }
 
@@ -203,8 +197,8 @@ impl<'a, T> Future for SendFut<'a, T> {
         if let Some(SendState::QueuedItem(hook)) = self.hook.as_ref() {
             if hook.is_empty() {
                 Poll::Ready(Ok(()))
-            } else if self.sender.shared.is_disconnected() {
-                let item = hook.try_take();
+            } else if self.sender.0.is_disconnected() {
+                let item = hook.take();
                 self.hook = None;
                 match item {
                     Some(item) => Poll::Ready(Err(SendError(item))),
@@ -216,25 +210,21 @@ impl<'a, T> Future for SendFut<'a, T> {
             }
         } else if let Some(SendState::NotYetSent(item)) = self.hook.take() {
             let this = self.get_mut();
-            let (shared, this_hook) = (&this.sender.shared, &mut this.hook);
+            let (shared, this_hook) = (&this.sender.0, &mut this.hook);
 
-            shared.send(
-                // item
+            match shared.send_inner(
                 item,
-                // should_block
                 true,
-                // make_signal
-                |msg| Hook::slot(Some(msg), AsyncSignal::new(cx, false)),
-                // do_block
-                |hook| {
+                |msg| Hook::new_slot(Some(msg), AsyncSignal::new(cx, false)),
+            ) {
+                Ok(Some(hook)) => {
                     *this_hook = Some(SendState::QueuedItem(hook));
                     Poll::Pending
-                },
-            )
-                .map(|r| r.map_err(|err| match err {
-                    TrySendTimeoutError::Disconnected(msg) => SendError(msg),
-                    _ => unreachable!(),
-                }))
+                }
+                Ok(None) => Poll::Ready(Ok(())),
+                Err(TrySendTimeoutError::Disconnected(msg)) => Poll::Ready(Err(SendError(msg))),
+                Err(_) => unreachable!(),
+            }
         } else { // Nothing to do
             Poll::Ready(Ok(()))
         }
@@ -243,7 +233,7 @@ impl<'a, T> Future for SendFut<'a, T> {
 
 impl<'a, T> FusedFuture for SendFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.sender.shared.is_disconnected()
+        self.sender.0.is_disconnected()
     }
 }
 
@@ -356,10 +346,9 @@ impl<T> Receiver<T> {
 /// A future which allows asynchronously receiving a message.
 ///
 /// Can be created via [`Receiver::recv_async`] or [`Receiver::into_recv_async`].
-#[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
 pub struct RecvFut<'a, T> {
     receiver: OwnedOrRef<'a, Receiver<T>>,
-    hook: Option<Arc<Hook<T, AsyncSignal>>>,
+    hook: Option<Hook<T, AsyncSignal>>,
 }
 
 impl<'a, T> RecvFut<'a, T> {
@@ -375,14 +364,12 @@ impl<'a, T> RecvFut<'a, T> {
     /// This is called on drop and after a new item is received in `Stream::poll_next`.
     fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
-            let hook: Arc<Hook<T, dyn Signal>> = hook;
-            let mut chan = wait_lock(&self.receiver.shared.chan);
-            // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
-            chan.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+            let mut lockable = self.receiver.0.lockable.lock().unwrap();
+            lockable.remove_recv_hook(&hook);
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
-                chan.try_wake_receiver_if_pending();
+                lockable.try_wake_receiver_if_pending();
             }
         }
     }
@@ -393,7 +380,7 @@ impl<'a, T> RecvFut<'a, T> {
         stream: bool,
     ) -> Poll<Result<T, RecvError>> {
         if self.hook.is_some() {
-            match self.receiver.shared.recv_sync(None) {
+            match self.receiver.recv_inner(None) {
                 Ok(msg) => return Poll::Ready(Ok(msg)),
                 Err(TryRecvTimeoutError::Disconnected) => {
                     return Poll::Ready(Err(RecvError::Disconnected))
@@ -401,23 +388,22 @@ impl<'a, T> RecvFut<'a, T> {
                 _ => (),
             }
 
-            let hook = self.hook.as_ref().map(Arc::clone).unwrap();
+            let hook = self.hook.clone().unwrap();
             if hook.update_waker(cx.waker()) {
                 // If the previous hook was awakened, we need to insert it back to the
                 // queue, otherwise, it remains valid.
-                wait_lock(&self.receiver.shared.chan)
-                    .waiting
-                    .push_back(hook);
+                self.receiver.0.lockable.lock().unwrap()
+                    .recv_waiting
+                    .push_back(hook.into_dyn());
             }
             // To avoid a missed wakeup, re-check disconnect status here because the channel might have
             // gotten shut down before we had a chance to push our hook
-            if self.receiver.shared.is_disconnected() {
+            if self.receiver.0.is_disconnected() {
                 // And now, to avoid a race condition between the first recv attempt and the disconnect check we
                 // just performed, attempt to recv again just in case we missed something.
                 Poll::Ready(
                     self.receiver
-                        .shared
-                        .recv_sync(None)
+                        .recv_inner(None)
                         .map(Ok)
                         .unwrap_or(Err(RecvError::Disconnected)),
                 )
@@ -426,23 +412,20 @@ impl<'a, T> RecvFut<'a, T> {
             }
         } else {
             let mut_self = self.get_mut();
-            let (shared, this_hook) = (&mut_self.receiver.shared, &mut mut_self.hook);
+            let (shared, this_hook) = (&mut_self.receiver.0, &mut mut_self.hook);
 
-            shared.recv(
-                // should_block
+            match shared.recv_inner(
                 true,
-                // make_signal
-                || Hook::trigger(AsyncSignal::new(cx, stream)),
-                // do_block
-                |hook| {
+                || Hook::new_trigger(AsyncSignal::new(cx, stream)),
+            ) {
+                Ok(Ok(msg)) => Poll::Ready(Ok(msg)),
+                Ok(Err(hook)) => {
                     *this_hook = Some(hook);
                     Poll::Pending
-                },
-            )
-                .map(|r| r.map_err(|err| match err {
-                    TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
-                    _ => unreachable!(),
-                }))
+                }
+                Err(TryRecvTimeoutError::Disconnected) => Poll::Ready(Err(RecvError::Disconnected)),
+                Err(_) => unreachable!(),
+            }
         }
     }
 
@@ -494,7 +477,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.receiver.shared.is_disconnected() && self.receiver.shared.is_empty()
+        self.receiver.0.is_disconnected() && self.receiver.0.is_empty()
     }
 }
 

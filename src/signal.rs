@@ -7,9 +7,10 @@ pub trait Signal: Send + Sync + 'static {
     /// grabbed by a receiver.
     fn fire(&self) -> bool;
     fn as_any(&self) -> &(dyn Any + 'static);
-    fn as_ptr(&self) -> *const ();
 }
 
+
+// signal for blocking
 pub struct SyncSignal(Thread);
 
 impl Default for SyncSignal {
@@ -24,7 +25,6 @@ impl Signal for SyncSignal {
         false
     }
     fn as_any(&self) -> &(dyn Any + 'static) { self }
-    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
 
 impl SyncSignal {

@@ -19,19 +19,11 @@ exclude = [
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[features]
-# Use a spinlock internally (may be faster on some platforms)
-spin = []
-select = []
-async = ["futures-sink", "futures-core"]
-eventual-fairness = ["select", "nanorand"]
-default = ["async", "select", "eventual-fairness"]
-
 [dependencies]
 spin1 = { package = "spin", version = "0.9.8", features = ["mutex"] }
-futures-sink = { version = "0.3", default_features = false, optional = true }
-futures-core = { version = "0.3", default_features = false, optional = true }
-nanorand = { version = "0.7", features = ["getrandom"], optional = true }
+futures-core = { version = "0.3", default-features = false }
+futures-sink = { version = "0.3", default-features = false }
+nanorand = { version = "0.7", features = ["getrandom"] }
 
 [dev-dependencies]
 #flume-test = { path = "../flume-test" }
