@@ -130,7 +130,7 @@ impl<'a, T> Selector<'a, T> {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
-                let r = self.sender.shared.send(
+                let r = self.sender.0.send(
                     self.msg.take().unwrap(),
                     true,
                     |msg| {
@@ -163,7 +163,7 @@ impl<'a, T> Selector<'a, T> {
             }
 
             fn poll(&mut self) -> Option<T> {
-                let res = if self.sender.shared.is_disconnected() {
+                let res = if self.sender.0.is_disconnected() {
                     // Check the hook one last time
                     if let Some(msg) = self.hook.as_ref()?.try_take() {
                         Err(SendError(msg))
@@ -184,7 +184,7 @@ impl<'a, T> Selector<'a, T> {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
-                    self.sender.shared.chan.lock().unwrap()
+                    self.sender.0.lockable.lock().unwrap()
                         .sending
                         .as_mut()
                         .unwrap()
@@ -233,7 +233,7 @@ impl<'a, T> Selector<'a, T> {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
-                let r = self.receiver.shared.recv(
+                let r = self.receiver.0.recv(
                     true,
                     || {
                         Hook::trigger(SelectSignal(
@@ -265,7 +265,7 @@ impl<'a, T> Selector<'a, T> {
                 let res = if let Ok(msg) = self.receiver.try_recv() {
                     self.received = true;
                     Ok(msg)
-                } else if self.receiver.shared.is_disconnected() {
+                } else if self.receiver.0.is_disconnected() {
                     Err(RecvError::Disconnected)
                 } else {
                     return None;
@@ -278,7 +278,7 @@ impl<'a, T> Selector<'a, T> {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
                     let hook: Arc<Hook<U, dyn Signal>> = hook;
-                    self.receiver.shared.chan.lock().unwrap()
+                    self.receiver.0.lockable.lock().unwrap()
                         .waiting
                         .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                     // If we were woken, but never polled, wake up another
@@ -291,7 +291,7 @@ impl<'a, T> Selector<'a, T> {
                             .2
                             .load(Ordering::SeqCst)
                     {
-                        self.receiver.shared.chan.lock().unwrap().try_wake_receiver_if_pending();
+                        self.receiver.0.lockable.lock().unwrap().try_wake_receiver_if_pending();
                     }
                 }
             }

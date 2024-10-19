@@ -24,7 +24,7 @@ impl<T> WeakSender<T> {
                     })
                     .is_ok()
             })
-            .map(|shared| Sender { shared })
+            .map(|shared| Sender(shared))
     }
 }
 

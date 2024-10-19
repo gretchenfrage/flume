@@ -39,26 +39,22 @@ struct Hook<T, S: ?Sized>(Option<Mutex<Option<T>>>, S);
 
 type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
 
-struct Chan<T> {
+struct Lockable<T> {
     sending: Option<(usize, SignalVec<T>)>,
     queue: VecDeque<T>,
     waiting: SignalVec<T>,
 }
 
 struct Shared<T> {
-    chan: Mutex<Chan<T>>,
+    lockable: Mutex<Lockable<T>>,
     disconnected: AtomicBool,
     sender_count: AtomicUsize,
     receiver_count: AtomicUsize,
 }
 
-pub struct Sender<T> {
-    shared: Arc<Shared<T>>,
-}
+pub struct Sender<T>(Arc<Shared<T>>);
 
-pub struct Receiver<T> {
-    shared: Arc<Shared<T>>,
-}
+pub struct Receiver<T>(Arc<Shared<T>>);
 
 
 impl<T, S: ?Sized + Signal> Hook<T, S> {
@@ -175,7 +171,7 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
-impl<T> Chan<T> {
+impl<T> Lockable<T> {
     fn pull_pending(&mut self, pull_extra: bool) {
         if let Some((cap, sending)) = &mut self.sending {
             let effective_cap = *cap + pull_extra as usize;
@@ -202,7 +198,7 @@ impl<T> Chan<T> {
 impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
-            chan: Mutex::new(Chan {
+            lockable: Mutex::new(Lockable {
                 sending: cap.map(|cap| (cap, VecDeque::new())),
                 queue: VecDeque::new(),
                 waiting: VecDeque::new(),
@@ -220,21 +216,21 @@ impl<T> Shared<T> {
         make_signal: impl FnOnce(T) -> Arc<Hook<T, S>>,
         do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
     ) -> R {
-        let mut chan = self.chan.lock().unwrap();
+        let mut lockable = self.lockable.lock().unwrap();
 
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
-        } else if !chan.waiting.is_empty() {
+        } else if !lockable.waiting.is_empty() {
             let mut msg = Some(msg);
 
             loop {
-                let slot = chan.waiting.pop_front();
+                let slot = lockable.waiting.pop_front();
                 match slot.as_ref().map(|r| r.fire_send(msg.take().unwrap())) {
                     // No more waiting receivers and msg in queue, so break out of the loop
                     None if msg.is_none() => break,
                     // No more waiting receivers, so add msg to queue and break out of the loop
                     None => {
-                        chan.queue.push_back(msg.unwrap());
+                        lockable.queue.push_back(msg.unwrap());
                         break;
                     }
                     Some((Some(m), signal)) => {
@@ -246,13 +242,13 @@ impl<T> Shared<T> {
                         } else {
                             // Was async and not a stream, so it did acquire the message. Push the
                             // message to the queue for it to be received.
-                            chan.queue.push_back(m);
-                            drop(chan);
+                            lockable.queue.push_back(m);
+                            drop(lockable);
                             break;
                         }
                     },
                     Some((None, signal)) => {
-                        drop(chan);
+                        drop(lockable);
                         signal.fire();
                         break; // Was sync, so it has acquired the message
                     },
@@ -260,13 +256,13 @@ impl<T> Shared<T> {
             }
 
             Ok(()).into()
-        } else if chan.sending.as_ref().map(|(cap, _)| chan.queue.len() < *cap).unwrap_or(true) {
-            chan.queue.push_back(msg);
+        } else if lockable.sending.as_ref().map(|(cap, _)| lockable.queue.len() < *cap).unwrap_or(true) {
+            lockable.queue.push_back(msg);
             Ok(()).into()
         } else if should_block { // Only bounded from here on
             let hook = make_signal(msg);
-            chan.sending.as_mut().unwrap().1.push_back(hook.clone());
-            drop(chan);
+            lockable.sending.as_mut().unwrap().1.push_back(hook.clone());
+            drop(lockable);
 
             do_block(hook)
         } else {
@@ -292,7 +288,7 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn signal::Signal>> = hook.clone();
-                            self.chan.lock().unwrap().sending
+                            self.lockable.lock().unwrap().sending
                                 .as_mut()
                                 .unwrap().1
                                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
@@ -321,23 +317,23 @@ impl<T> Shared<T> {
         make_signal: impl FnOnce() -> Arc<Hook<T, S>>,
         do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
     ) -> R {
-        let mut chan = self.chan.lock().unwrap();
-        chan.pull_pending(true);
+        let mut lockable = self.lockable.lock().unwrap();
+        lockable.pull_pending(true);
 
-        if let Some(msg) = chan.queue.pop_front() {
-            drop(chan);
+        if let Some(msg) = lockable.queue.pop_front() {
+            drop(lockable);
             Ok(msg).into()
         } else if self.is_disconnected() {
-            drop(chan);
+            drop(lockable);
             Err(TryRecvTimeoutError::Disconnected).into()
         } else if should_block {
             let hook = make_signal();
-            chan.waiting.push_back(hook.clone());
-            drop(chan);
+            lockable.waiting.push_back(hook.clone());
+            drop(lockable);
 
             do_block(hook)
         } else {
-            drop(chan);
+            drop(lockable);
             Err(TryRecvTimeoutError::Empty).into()
         }
     }
@@ -354,14 +350,14 @@ impl<T> Shared<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
-                            self.chan.lock().unwrap().waiting
+                            self.lockable.lock().unwrap().waiting
                                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                         }
                         match hook.try_take() {
                             Some(msg) => Ok(msg),
                             None => {
                                 let disconnected = self.is_disconnected(); // Check disconnect *before* msg
-                                if let Some(msg) = self.chan.lock().unwrap().queue.pop_front() {
+                                if let Some(msg) = self.lockable.lock().unwrap().queue.pop_front() {
                                     Ok(msg)
                                 } else if disconnected {
                                     Err(TryRecvTimeoutError::Disconnected)
@@ -373,7 +369,7 @@ impl<T> Shared<T> {
                     })
             } else {
                 hook.wait_recv(&self.disconnected)
-                    .or_else(|| self.chan.lock().unwrap().queue.pop_front())
+                    .or_else(|| self.lockable.lock().unwrap().queue.pop_front())
                     .ok_or(TryRecvTimeoutError::Disconnected)
             },
         )
@@ -384,14 +380,14 @@ impl<T> Shared<T> {
     fn disconnect_all(&self) {
         self.disconnected.store(true, Ordering::Relaxed);
 
-        let mut chan = self.chan.lock().unwrap();
-        chan.pull_pending(false);
-        if let Some((_, sending)) = chan.sending.as_ref() {
+        let mut lockable = self.lockable.lock().unwrap();
+        lockable.pull_pending(false);
+        if let Some((_, sending)) = lockable.sending.as_ref() {
             sending.iter().for_each(|hook| {
                 hook.signal().fire();
             })
         }
-        chan.waiting.iter().for_each(|hook| {
+        lockable.waiting.iter().for_each(|hook| {
             hook.signal().fire();
         });
     }
@@ -409,13 +405,13 @@ impl<T> Shared<T> {
     }
 
     fn len(&self) -> usize {
-        let mut chan = self.chan.lock().unwrap();
-        chan.pull_pending(false);
-        chan.queue.len()
+        let mut lockable = self.lockable.lock().unwrap();
+        lockable.pull_pending(false);
+        lockable.queue.len()
     }
 
     fn capacity(&self) -> Option<usize> {
-        self.chan.lock().unwrap().sending.as_ref().map(|(cap, _)| *cap)
+        self.lockable.lock().unwrap().sending.as_ref().map(|(cap, _)| *cap)
     }
 
     fn sender_count(&self) -> usize {
@@ -429,7 +425,7 @@ impl<T> Shared<T> {
 
 impl<T> Sender<T> {
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.shared.send_sync(msg, None).map_err(|err| match err {
+        self.0.send_sync(msg, None).map_err(|err| match err {
             TrySendTimeoutError::Full(msg) => TrySendError::Full(msg),
             TrySendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
             _ => unreachable!(),
@@ -437,14 +433,14 @@ impl<T> Sender<T> {
     }
 
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.shared.send_sync(msg, Some(None)).map_err(|err| match err {
+        self.0.send_sync(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
             _ => unreachable!(),
         })
     }
 
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
-        self.shared.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
+        self.0.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
             TrySendTimeoutError::Timeout(msg) => SendTimeoutError::Timeout(msg),
             _ => unreachable!(),
@@ -456,48 +452,48 @@ impl<T> Sender<T> {
     }
 
     pub fn is_disconnected(&self) -> bool {
-        self.shared.is_disconnected()
+        self.0.is_disconnected()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.shared.is_empty()
+        self.0.is_empty()
     }
 
     pub fn is_full(&self) -> bool {
-        self.shared.is_full()
+        self.0.is_full()
     }
 
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.0.len()
     }
 
     pub fn capacity(&self) -> Option<usize> {
-        self.shared.capacity()
+        self.0.capacity()
     }
 
     pub fn sender_count(&self) -> usize {
-        self.shared.sender_count()
+        self.0.sender_count()
     }
 
     pub fn receiver_count(&self) -> usize {
-        self.shared.receiver_count()
+        self.0.receiver_count()
     }
 
     pub fn downgrade(&self) -> WeakSender<T> {
         WeakSender {
-            shared: Arc::downgrade(&self.shared),
+            shared: Arc::downgrade(&self.0),
         }
     }
 
     pub fn same_channel(&self, other: &Sender<T>) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
-        Self { shared: self.shared.clone() }
+        self.0.sender_count.fetch_add(1, Ordering::Relaxed);
+        Self(self.0.clone())
     }
 }
 
@@ -510,15 +506,15 @@ impl<T> fmt::Debug for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // Notify receivers that all senders have been dropped if the number of senders drops to 0.
-        if self.shared.sender_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.shared.disconnect_all();
+        if self.0.sender_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.0.disconnect_all();
         }
     }
 }
 
 impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        self.shared.recv_sync(None).map_err(|err| match err {
+        self.0.recv_sync(None).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => TryRecvError::Disconnected,
             TryRecvTimeoutError::Empty => TryRecvError::Empty,
             _ => unreachable!(),
@@ -526,14 +522,14 @@ impl<T> Receiver<T> {
     }
 
     pub fn recv(&self) -> Result<T, RecvError> {
-        self.shared.recv_sync(Some(None)).map_err(|err| match err {
+        self.0.recv_sync(Some(None)).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
             _ => unreachable!(),
         })
     }
 
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        self.shared.recv_sync(Some(Some(deadline))).map_err(|err| match err {
+        self.0.recv_sync(Some(Some(deadline))).map_err(|err| match err {
             TryRecvTimeoutError::Disconnected => RecvTimeoutError::Disconnected,
             TryRecvTimeoutError::Timeout => RecvTimeoutError::Timeout,
             _ => unreachable!(),
@@ -553,50 +549,50 @@ impl<T> Receiver<T> {
     }
 
     pub fn drain(&self) -> Drain<T> {
-        let mut chan = self.shared.chan.lock().unwrap();
-        chan.pull_pending(false);
-        let queue = std::mem::take(&mut chan.queue);
+        let mut lockable = self.0.lockable.lock().unwrap();
+        lockable.pull_pending(false);
+        let queue = std::mem::take(&mut lockable.queue);
 
         Drain { queue, _phantom: PhantomData }
     }
 
     pub fn is_disconnected(&self) -> bool {
-        self.shared.is_disconnected()
+        self.0.is_disconnected()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.shared.is_empty()
+        self.0.is_empty()
     }
 
     pub fn is_full(&self) -> bool {
-        self.shared.is_full()
+        self.0.is_full()
     }
 
     pub fn len(&self) -> usize {
-        self.shared.len()
+        self.0.len()
     }
 
     pub fn capacity(&self) -> Option<usize> {
-        self.shared.capacity()
+        self.0.capacity()
     }
 
     pub fn sender_count(&self) -> usize {
-        self.shared.sender_count()
+        self.0.sender_count()
     }
 
     pub fn receiver_count(&self) -> usize {
-        self.shared.receiver_count()
+        self.0.receiver_count()
     }
 
     pub fn same_channel(&self, other: &Receiver<T>) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.shared.receiver_count.fetch_add(1, Ordering::Relaxed);
-        Self { shared: self.shared.clone() }
+        self.0.receiver_count.fetch_add(1, Ordering::Relaxed);
+        Self(self.0.clone())
     }
 }
 
@@ -610,24 +606,18 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         // Notify senders that all receivers have been dropped if the number of receivers drops
         // to 0.
-        if self.shared.receiver_count.fetch_sub(1, Ordering::Relaxed) == 1 {
-            self.shared.disconnect_all();
+        if self.0.receiver_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.0.disconnect_all();
         }
     }
 }
 
 pub fn unbounded<T>() -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(None));
-    (
-        Sender { shared: shared.clone() },
-        Receiver { shared },
-    )
+    (Sender(shared.clone()), Receiver(shared))
 }
 
 pub fn bounded<T>(cap: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared::new(Some(cap)));
-    (
-        Sender { shared: shared.clone() },
-        Receiver { shared },
-    )
+    (Sender(shared.clone()), Receiver(shared))
 }

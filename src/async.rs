@@ -156,7 +156,7 @@ impl<'a, T> SendFut<'a, T> {
     fn reset_hook(&mut self) {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
-            self.sender.shared.chan.lock().unwrap().sending
+            self.sender.0.lockable.lock().unwrap().sending
                 .as_mut()
                 .unwrap().1
                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
@@ -203,7 +203,7 @@ impl<'a, T> Future for SendFut<'a, T> {
         if let Some(SendState::QueuedItem(hook)) = self.hook.as_ref() {
             if hook.is_empty() {
                 Poll::Ready(Ok(()))
-            } else if self.sender.shared.is_disconnected() {
+            } else if self.sender.0.is_disconnected() {
                 let item = hook.try_take();
                 self.hook = None;
                 match item {
@@ -216,7 +216,7 @@ impl<'a, T> Future for SendFut<'a, T> {
             }
         } else if let Some(SendState::NotYetSent(item)) = self.hook.take() {
             let this = self.get_mut();
-            let (shared, this_hook) = (&this.sender.shared, &mut this.hook);
+            let (shared, this_hook) = (&this.sender.0, &mut this.hook);
 
             shared.send(
                 // item
@@ -243,7 +243,7 @@ impl<'a, T> Future for SendFut<'a, T> {
 
 impl<'a, T> FusedFuture for SendFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.sender.shared.is_disconnected()
+        self.sender.0.is_disconnected()
     }
 }
 
@@ -376,13 +376,13 @@ impl<'a, T> RecvFut<'a, T> {
     fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
             let hook: Arc<Hook<T, dyn Signal>> = hook;
-            let mut chan = self.receiver.shared.chan.lock().unwrap();
+            let mut lockable = self.receiver.0.lockable.lock().unwrap();
             // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
-            chan.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+            lockable.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
-                chan.try_wake_receiver_if_pending();
+                lockable.try_wake_receiver_if_pending();
             }
         }
     }
@@ -393,7 +393,7 @@ impl<'a, T> RecvFut<'a, T> {
         stream: bool,
     ) -> Poll<Result<T, RecvError>> {
         if self.hook.is_some() {
-            match self.receiver.shared.recv_sync(None) {
+            match self.receiver.0.recv_sync(None) {
                 Ok(msg) => return Poll::Ready(Ok(msg)),
                 Err(TryRecvTimeoutError::Disconnected) => {
                     return Poll::Ready(Err(RecvError::Disconnected))
@@ -405,18 +405,18 @@ impl<'a, T> RecvFut<'a, T> {
             if hook.update_waker(cx.waker()) {
                 // If the previous hook was awakened, we need to insert it back to the
                 // queue, otherwise, it remains valid.
-                self.receiver.shared.chan.lock().unwrap()
+                self.receiver.0.lockable.lock().unwrap()
                     .waiting
                     .push_back(hook);
             }
             // To avoid a missed wakeup, re-check disconnect status here because the channel might have
             // gotten shut down before we had a chance to push our hook
-            if self.receiver.shared.is_disconnected() {
+            if self.receiver.0.is_disconnected() {
                 // And now, to avoid a race condition between the first recv attempt and the disconnect check we
                 // just performed, attempt to recv again just in case we missed something.
                 Poll::Ready(
                     self.receiver
-                        .shared
+                        .0
                         .recv_sync(None)
                         .map(Ok)
                         .unwrap_or(Err(RecvError::Disconnected)),
@@ -426,7 +426,7 @@ impl<'a, T> RecvFut<'a, T> {
             }
         } else {
             let mut_self = self.get_mut();
-            let (shared, this_hook) = (&mut_self.receiver.shared, &mut mut_self.hook);
+            let (shared, this_hook) = (&mut_self.receiver.0, &mut mut_self.hook);
 
             shared.recv(
                 // should_block
@@ -494,7 +494,7 @@ impl<'a, T> Future for RecvFut<'a, T> {
 
 impl<'a, T> FusedFuture for RecvFut<'a, T> {
     fn is_terminated(&self) -> bool {
-        self.receiver.shared.is_disconnected() && self.receiver.shared.is_empty()
+        self.receiver.0.is_disconnected() && self.receiver.0.is_empty()
     }
 }
 
