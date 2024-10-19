@@ -243,44 +243,36 @@ impl<T> Shared<T> {
         may_block: bool,
         make_hook: impl FnOnce(T) -> Hook<T, S>,
     ) -> Result<Option<Hook<T, S>>, TrySendTimeoutError<T>> {
-        let mut lockable = self.lockable.lock().unwrap();
-
         if self.is_disconnected() {
-            // channel disconnected, return error
-            Err(TrySendTimeoutError::Disconnected(msg))
-        } else if !lockable.recv_waiting.is_empty() {
-            // try giving the message to recv_waiting hooks before pushing to the queue
-            loop {
-                match lockable.recv_waiting.pop_front() {
-                    None => {
-                        // exhausted hooks, push to queue
-                        lockable.queue.push_back(msg);
-                        break;
-                    }
-                    Some(hook) => if let Some(slot) = hook.slot() {
-                        // hook with a slot (sync). give the message to the hook and fire it.
-                        *slot.lock().unwrap() = Some(msg);
-                        drop(lockable);
-                        hook.signal().fire();
-                        break;
-                    } else if !hook.signal().fire() {
-                        // non-stream hook without slot (async non-stream). it was fired. push the
-                        // message to the queue to it can be taken.
-                        lockable.queue.push_back(msg);
-                        break;
-                    }
-                }
+            return Err(TrySendTimeoutError::Disconnected(msg));
+        }
+                
+        let mut lock = self.lockable.lock().unwrap();
+
+        // try giving the message to a recv_waiting hook before pushing to the queue
+        while let Some(hook) = lock.recv_waiting.pop_front() {
+            if let Some(slot) = hook.slot() {
+                // hook with a slot (sync). give the message to the hook and fire it.
+                *slot.lock().unwrap() = Some(msg);
+                drop(lock);
+                hook.signal().fire();
+                return Ok(None);
+            } else if !hook.signal().fire() {
+                // non-stream hook without slot (async non-stream). it was fired. push the
+                // message to the queue to it can be taken.
+                lock.queue.push_back(msg);
+                return Ok(None);
             }
-            Ok(None)
-        } else if lockable.send_waiting.as_ref().map(|send_waiting| lockable.queue.len() < send_waiting.cap).unwrap_or(true) {
+        }
+        
+        if lock.send_waiting.as_ref().map(|sw| lock.queue.len() < sw.cap).unwrap_or(true) {
             // simply put the message in the queue
-            lockable.queue.push_back(msg);
+            lock.queue.push_back(msg);
             Ok(None)
         } else if may_block {
             // queue is full, create a hook, put one handle in `send_waiting` and return another
             let hook = make_hook(msg);
-            lockable.send_waiting.as_mut().unwrap().hooks.push_back(hook.clone().into_dyn());
-            drop(lockable);
+            lock.send_waiting.as_mut().unwrap().hooks.push_back(hook.clone().into_dyn());
             Ok(Some(hook))
         } else {
             // queue is full and blocking is not allowed
