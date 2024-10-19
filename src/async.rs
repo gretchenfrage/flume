@@ -386,7 +386,7 @@ impl<'a, T> RecvFut<'a, T> {
         stream: bool,
     ) -> Poll<Result<T, RecvError>> {
         if self.hook.is_some() {
-            match self.receiver.0.recv_sync(None) {
+            match self.receiver.recv_inner(None) {
                 Ok(msg) => return Poll::Ready(Ok(msg)),
                 Err(TryRecvTimeoutError::Disconnected) => {
                     return Poll::Ready(Err(RecvError::Disconnected))
@@ -409,8 +409,7 @@ impl<'a, T> RecvFut<'a, T> {
                 // just performed, attempt to recv again just in case we missed something.
                 Poll::Ready(
                     self.receiver
-                        .0
-                        .recv_sync(None)
+                        .recv_inner(None)
                         .map(Ok)
                         .unwrap_or(Err(RecvError::Disconnected)),
                 )
@@ -421,7 +420,7 @@ impl<'a, T> RecvFut<'a, T> {
             let mut_self = self.get_mut();
             let (shared, this_hook) = (&mut_self.receiver.0, &mut mut_self.hook);
 
-            match shared.recv(
+            match shared.recv_inner(
                 true,
                 || Hook::new_trigger(AsyncSignal::new(cx, stream)),
             ) {

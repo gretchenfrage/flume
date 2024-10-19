@@ -207,7 +207,7 @@ impl<'a, T> Selector<'a, T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
                 let r = match self.receiver.0
-                    .recv(
+                    .recv_inner(
                         true,
                         || Hook::new_trigger(SelectSignal(
                             thread::current(),
