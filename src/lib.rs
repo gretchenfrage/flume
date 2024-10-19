@@ -7,7 +7,6 @@ mod error;
 mod iterator;
 mod weak;
 
-// Reexports
 pub use select::Selector;
 pub use self::error::*;
 pub use self::iterator::*;
@@ -62,7 +61,7 @@ struct SendWaiting<T> {
     /// channel capacity
     cap: usize,
     /// hook for each thread-like blocking on sending a message
-    signals: VecDeque<Hook<T, dyn Signal>>,
+    hooks: VecDeque<Hook<T, dyn Signal>>,
 }
 
 /// reference-counted struct of optional mutex-guarded message "slot" plus dyn-able notify signal
@@ -90,18 +89,6 @@ impl<T, S: Signal> Hook<T, S> {
     /// upcast into dyn signal
     fn into_dyn(self) -> Hook<T, dyn Signal> {
         Hook(self.0)
-    }
-}
-
-impl<T, S: ?Sized> Clone for Hook<T, S> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
-}
-
-impl<T1, T2, S1: ?Sized, S2: ?Sized> PartialEq<Hook<T2, S2>> for Hook<T1, S1> {
-    fn eq(&self, rhs: &Hook<T2, S2>) -> bool {
-        Arc::as_ptr(&self.0) as *const () == Arc::as_ptr(&rhs.0) as *const () 
     }
 }
 
@@ -189,6 +176,18 @@ impl<T> Hook<T, SyncSignal> {
     }
 }
 
+impl<T, S: ?Sized> Clone for Hook<T, S> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T1, T2, S1: ?Sized, S2: ?Sized> PartialEq<Hook<T2, S2>> for Hook<T1, S1> {
+    fn eq(&self, rhs: &Hook<T2, S2>) -> bool {
+        Arc::as_ptr(&self.0) as *const () == Arc::as_ptr(&rhs.0) as *const () 
+    }
+}
+
 impl<T> Lockable<T> {
     /// pop and resolve as many hooks in `send_waiting` as possible, by moving their message to
     /// the queue and notifying their signals. if `pull_extra` is true, the queue is allowed to
@@ -198,7 +197,7 @@ impl<T> Lockable<T> {
             let effective_cap = send_waiting.cap + pull_extra as usize;
 
             while self.queue.len() < effective_cap {
-                if let Some(s) = send_waiting.signals.pop_front() {
+                if let Some(s) = send_waiting.hooks.pop_front() {
                     let msg = s.take().unwrap();
                     s.signal().fire();
                     self.queue.push_back(msg);
@@ -225,7 +224,7 @@ impl<T> Shared<T> {
             lockable: Mutex::new(Lockable {
                 send_waiting: cap.map(|cap| SendWaiting {
                     cap,
-                    signals: Default::default(),
+                    hooks: Default::default(),
                 }),
                 queue: Default::default(),
                 recv_waiting: Default::default(),
@@ -280,52 +279,13 @@ impl<T> Shared<T> {
         } else if may_block {
             // queue is full, create a hook, put one handle in `send_waiting` and return another
             let hook = make_hook(msg);
-            lockable.send_waiting.as_mut().unwrap().signals.push_back(hook.clone().into_dyn());
+            lockable.send_waiting.as_mut().unwrap().hooks.push_back(hook.clone().into_dyn());
             drop(lockable);
             Ok(Some(hook))
         } else {
             // queue is full and blocking is not allowed
             Err(TrySendTimeoutError::Full(msg))
         }
-    }
-
-    /// call `send_inner` and uses a `SyncSignal` to block if necessary.
-    fn send_blocking(
-        &self,
-        msg: T,
-        block: Option<Option<Instant>>,
-    ) -> Result<(), TrySendTimeoutError<T>> {
-        if let Some(hook) = self.send_inner(
-            msg,
-            block.is_some(),
-            |msg| Hook::new_slot(Some(msg), SyncSignal::default()),
-        )? {
-            if let Some(deadline) = block.unwrap() {
-                hook.wait_deadline_send(&self.disconnected, deadline)
-                    .or_else(|timed_out| {
-                        if timed_out { // Remove our signal
-                            let hook = hook.clone();
-                            self.lockable.lock().unwrap().send_waiting
-                                .as_mut()
-                                .unwrap().signals
-                                .retain(|s| *s != hook);
-                        }
-                        hook.take().map(|msg| if self.is_disconnected() {
-                            Err(TrySendTimeoutError::Disconnected(msg))
-                        } else {
-                            Err(TrySendTimeoutError::Timeout(msg))
-                        })
-                        .unwrap_or(Ok(()))
-                    })?;
-            } else {
-                hook.wait_send(&self.disconnected);
-
-                if let Some(msg) = hook.take() {
-                    return Err(TrySendTimeoutError::Disconnected(msg));
-                }
-            }
-        }
-        Ok(())
     }
 
     fn recv<S: Signal, R: From<Result<T, TryRecvTimeoutError>>>(
@@ -400,7 +360,7 @@ impl<T> Shared<T> {
         let mut lockable = self.lockable.lock().unwrap();
         lockable.pull_pending(false);
         if let Some(send_waiting) = lockable.send_waiting.as_ref() {
-            send_waiting.signals.iter().for_each(|hook| {
+            send_waiting.hooks.iter().for_each(|hook| {
                 hook.signal().fire();
             })
         }
@@ -446,8 +406,47 @@ pub struct Sender<T>(Arc<Shared<T>>);
 pub struct Receiver<T>(Arc<Shared<T>>);
 
 impl<T> Sender<T> {
+    /// call `send_inner` and uses a `SyncSignal` to block if necessary.
+    fn send_inner(
+        &self,
+        msg: T,
+        block: Option<Option<Instant>>,
+    ) -> Result<(), TrySendTimeoutError<T>> {
+        if let Some(hook) = self.0.send_inner(
+            msg,
+            block.is_some(),
+            |msg| Hook::new_slot(Some(msg), SyncSignal::default()),
+        )? {
+            if let Some(deadline) = block.unwrap() {
+                hook.wait_deadline_send(&self.0.disconnected, deadline)
+                    .or_else(|timed_out| {
+                        if timed_out { // Remove our signal
+                            let hook = hook.clone();
+                            self.0.lockable.lock().unwrap().send_waiting
+                                .as_mut()
+                                .unwrap().hooks
+                                .retain(|s| *s != hook);
+                        }
+                        hook.take().map(|msg| if self.is_disconnected() {
+                            Err(TrySendTimeoutError::Disconnected(msg))
+                        } else {
+                            Err(TrySendTimeoutError::Timeout(msg))
+                        })
+                        .unwrap_or(Ok(()))
+                    })?;
+            } else {
+                hook.wait_send(&self.0.disconnected);
+
+                if let Some(msg) = hook.take() {
+                    return Err(TrySendTimeoutError::Disconnected(msg));
+                }
+            }
+        }
+        Ok(())
+    }
+    
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.0.send_blocking(msg, None).map_err(|err| match err {
+        self.send_inner(msg, None).map_err(|err| match err {
             TrySendTimeoutError::Full(msg) => TrySendError::Full(msg),
             TrySendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
             _ => unreachable!(),
@@ -455,14 +454,14 @@ impl<T> Sender<T> {
     }
 
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.0.send_blocking(msg, Some(None)).map_err(|err| match err {
+        self.send_inner(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
             _ => unreachable!(),
         })
     }
 
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
-        self.0.send_blocking(msg, Some(Some(deadline))).map_err(|err| match err {
+        self.send_inner(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
             TrySendTimeoutError::Timeout(msg) => SendTimeoutError::Timeout(msg),
             _ => unreachable!(),

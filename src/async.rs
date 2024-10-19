@@ -156,7 +156,7 @@ impl<'a, T> SendFut<'a, T> {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
             self.sender.0.lockable.lock().unwrap().send_waiting
                 .as_mut()
-                .unwrap().signals
+                .unwrap().hooks
                 .retain(|s| *s != hook);
         }
     }

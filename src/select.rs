@@ -161,7 +161,7 @@ impl<'a, T> Selector<'a, T> {
                         .send_waiting
                         .as_mut()
                         .unwrap()
-                        .signals
+                        .hooks
                         .retain(|s| *s != hook);
                 }
             }
