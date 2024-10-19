@@ -206,29 +206,27 @@ impl<'a, T> Selector<'a, T> {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
-                let r = self.receiver.0.recv(
-                    true,
-                    || {
-                        Hook::new_trigger(SelectSignal(
+                let r = match self.receiver.0
+                    .recv(
+                        true,
+                        || Hook::new_trigger(SelectSignal(
                             thread::current(),
                             token,
                             AtomicBool::new(false),
                             signalled,
-                        ))
-                    },
-                    // Always runs
-                    |h| {
-                        self.hook = Some(h);
-                        Err(TryRecvTimeoutError::Timeout)
-                    },
-                );
-
+                        )),
+                    )
+                {
+                    Ok(Err(hook)) => {
+                        self.hook = Some(hook);
+                        return None;
+                    }
+                    Ok(Ok(msg)) => Ok(msg),
+                    Err(TryRecvTimeoutError::Disconnected) => Err(RecvError::Disconnected),
+                    Err(_) => unreachable!(),
+                };
                 if self.hook.is_none() {
-                    Some((self.mapper)(match r {
-                        Ok(msg) => Ok(msg),
-                        Err(TryRecvTimeoutError::Disconnected) => Err(RecvError::Disconnected),
-                        _ => unreachable!(),
-                    }))
+                    Some((self.mapper)(r))
                 } else {
                     None
                 }

@@ -421,21 +421,18 @@ impl<'a, T> RecvFut<'a, T> {
             let mut_self = self.get_mut();
             let (shared, this_hook) = (&mut_self.receiver.0, &mut mut_self.hook);
 
-            shared.recv(
-                // should_block
+            match shared.recv(
                 true,
-                // make_signal
                 || Hook::new_trigger(AsyncSignal::new(cx, stream)),
-                // do_block
-                |hook| {
+            ) {
+                Ok(Ok(msg)) => Poll::Ready(Ok(msg)),
+                Ok(Err(hook)) => {
                     *this_hook = Some(hook);
                     Poll::Pending
-                },
-            )
-                .map(|r| r.map_err(|err| match err {
-                    TryRecvTimeoutError::Disconnected => RecvError::Disconnected,
-                    _ => unreachable!(),
-                }))
+                }
+                Err(TryRecvTimeoutError::Disconnected) => Poll::Ready(Err(RecvError::Disconnected)),
+                Err(_) => unreachable!(),
+            }
         }
     }
 

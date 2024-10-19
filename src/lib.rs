@@ -244,9 +244,10 @@ impl<T> Shared<T> {
         make_hook: impl FnOnce(T) -> Hook<T, S>,
     ) -> Result<Option<Hook<T, S>>, TrySendTimeoutError<T>> {
         if self.is_disconnected() {
+            // disconnected
             return Err(TrySendTimeoutError::Disconnected(msg));
         }
-                
+
         let mut lock = self.lockable.lock().unwrap();
 
         // try giving the message to a recv_waiting hook before pushing to the queue
@@ -280,41 +281,40 @@ impl<T> Shared<T> {
         }
     }
 
-    fn recv<S: Signal, R: From<Result<T, TryRecvTimeoutError>>>(
+    /// inner routine to receive a message from the channel. if should block, calls `make_hook`,
+    /// adds one handle as a `recv_waiting` hook, and returns a second handle in `Ok(Err)`.
+    fn recv<S: Signal>(
         &self,
-        should_block: bool,
-        make_signal: impl FnOnce() -> Hook<T, S>,
-        do_block: impl FnOnce(Hook<T, S>) -> R,
-    ) -> R {
-        let mut lockable = self.lockable.lock().unwrap();
-        lockable.pull_pending(true);
+        may_block: bool,
+        make_hook: impl FnOnce() -> Hook<T, S>,
+    ) -> Result<Result<T, Hook<T, S>>, TryRecvTimeoutError> {
+        let mut lock = self.lockable.lock().unwrap();
+        lock.pull_pending(true);
 
-        if let Some(msg) = lockable.queue.pop_front() {
-            drop(lockable);
-            Ok(msg).into()
+        if let Some(msg) = lock.queue.pop_front() {
+            // message to take
+            Ok(Ok(msg))
         } else if self.is_disconnected() {
-            drop(lockable);
-            Err(TryRecvTimeoutError::Disconnected).into()
-        } else if should_block {
-            let hook = make_signal();
-            lockable.recv_waiting.push_back(hook.clone().into_dyn());
-            drop(lockable);
-
-            do_block(hook)
+            // disconnected
+            Err(TryRecvTimeoutError::Disconnected)
+        } else if may_block {
+            // block
+            let hook = make_hook();
+            lock.recv_waiting.push_back(hook.clone().into_dyn());
+            Ok(Err(hook))
         } else {
-            drop(lockable);
-            Err(TryRecvTimeoutError::Empty).into()
+            // not allowed to block
+            Err(TryRecvTimeoutError::Empty)
         }
     }
 
     fn recv_sync(&self, block: Option<Option<Instant>>) -> Result<T, TryRecvTimeoutError> {
-        self.recv(
-            // should_block
-            block.is_some(),
-            // make_signal
-            || Hook::new_slot(None, SyncSignal::default()),
-            // do_block
-            |hook| if let Some(deadline) = block.unwrap() {
+        self
+            .recv(
+                block.is_some(),
+                || Hook::new_slot(None, SyncSignal::default()),
+            )
+            .and_then(|r| r.map(Ok).unwrap_or_else(|hook| if let Some(deadline) = block.unwrap() {
                 hook.wait_deadline_recv(&self.disconnected, deadline)
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
@@ -340,8 +340,7 @@ impl<T> Shared<T> {
                 hook.wait_recv(&self.disconnected)
                     .or_else(|| self.lockable.lock().unwrap().queue.pop_front())
                     .ok_or(TryRecvTimeoutError::Disconnected)
-            },
-        )
+            }))
     }
 
     /// Disconnect anything listening on this channel (this will not prevent receivers receiving
