@@ -242,36 +242,36 @@ impl<T> Shared<T> {
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
         } else if !lockable.recv_waiting.is_empty() {
-            let mut msg = Some(msg);
+            let mut opt_msg = Some(msg);
 
             loop {
-                let slot = lockable.recv_waiting.pop_front();
-                match slot.as_ref().map(|r| r.fire_send(msg.take().unwrap())) {
-                    // No more waiting receivers, so add msg to queue and break out of the loop
+                let msg = opt_msg.unwrap();
+                opt_msg = Some(match lockable.recv_waiting.pop_front() {
                     None => {
-                        lockable.queue.push_back(msg.unwrap());
-                        break;
+                        lockable.queue.push_back(msg);
+                        break
                     }
-                    Some((Some(m), signal)) => {
-                        if signal.fire() {
-                            // Was async and a stream, so didn't acquire the message. Wake another
-                            // receiver, and do not yet push the message.
-                            msg.replace(m); // TODO lol
-                            continue;
-                        } else {
-                            // Was async and not a stream, so it did acquire the message. Push the
-                            // message to the queue for it to be received.
-                            lockable.queue.push_back(m);
+                    Some(slot) => match slot.fire_send(msg) {
+                        (Some(m), signal) => {
+                            if signal.fire() {
+                                // Was async and a stream, so didn't acquire the message. Wake another
+                                // receiver, and do not yet push the message.
+                                m
+                            } else {
+                                // Was async and not a stream, so it did acquire the message. Push the
+                                // message to the queue for it to be received.
+                                lockable.queue.push_back(m);
+                                drop(lockable);
+                                break
+                            }
+                        },
+                        (None, signal) => {
                             drop(lockable);
-                            break;
-                        }
-                    },
-                    Some((None, signal)) => {
-                        drop(lockable);
-                        signal.fire();
-                        break; // Was sync, so it has acquired the message
-                    },
-                }
+                            signal.fire();
+                            break // Was sync, so it has acquired the message
+                        },
+                    }
+                });
             }
 
             Ok(()).into()
