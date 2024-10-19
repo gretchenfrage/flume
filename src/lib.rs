@@ -107,16 +107,14 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     fn signal(&self) -> &S {
         &self.0.signal
     }
-    
-    pub fn fire(&self) -> bool {
-        self.signal().fire()
-    }
 
-    pub fn is_empty(&self) -> bool {
+    /// false if there is a full slot, true if there is either an empty slot or no slot
+    fn is_empty(&self) -> bool {
         self.slot().map(|slot| slot.lock().unwrap().is_none()).unwrap_or(true)
     }
 
-    pub fn take(&self) -> Option<T> {
+    /// take the message from the slot
+    fn take(&self) -> Option<T> {
         self.slot().unwrap().lock().unwrap().take()
     }
 }
@@ -189,7 +187,7 @@ impl<T> Lockable<T> {
             while self.queue.len() < effective_cap {
                 if let Some(s) = send_waiting.signals.pop_front() {
                     let msg = s.take().unwrap();
-                    s.fire();
+                    s.signal().fire();
                     self.queue.push_back(msg);
                 } else {
                     break;
@@ -200,7 +198,7 @@ impl<T> Lockable<T> {
 
     fn try_wake_receiver_if_pending(&mut self) {
         if !self.queue.is_empty() {
-            while Some(false) == self.recv_waiting.pop_front().map(|s| s.fire()) {}
+            while Some(false) == self.recv_waiting.pop_front().map(|s| s.signal().fire()) {}
         }
     }
 }
@@ -243,9 +241,9 @@ impl<T> Shared<T> {
                     Some(hook) => if let Some(slot) = hook.slot() {
                         *slot.lock().unwrap() = Some(msg);
                         drop(lockable);
-                        hook.fire();
+                        hook.signal().fire();
                         break // Was sync, so it has acquired the message
-                    } else if hook.fire() {
+                    } else if hook.signal().fire() {
                         // Was async and a stream, so didn't acquire the message. Wake another
                         // receiver, and do not yet push the message.
                         msg
