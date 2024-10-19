@@ -75,14 +75,17 @@ struct HookInner<T, S: ?Sized> {
 }
 
 impl<T, S: Signal> Hook<T, S> {
+    /// construct with slot
     fn new_slot(msg: Option<T>, signal: S) -> Self {
         Self(Arc::new(HookInner { slot: Some(Mutex::new(msg)), signal }))
     }
     
+    /// construct without slot
     fn new_trigger(signal: S) -> Self {
         Self(Arc::new(HookInner { slot: None, signal }))
     }
     
+    /// upcast into dyn signal
     fn into_dyn(self) -> Hook<T, dyn Signal> {
         Hook(self.0)
     }
@@ -95,17 +98,14 @@ impl<T, S: ?Sized + Signal> Clone for Hook<T, S> {
 }
 
 impl<T, S: ?Sized + Signal> Hook<T, S> {
+    /// get the mutex-guarded slot by optional reference
     fn slot(&self) -> Option<&Mutex<Option<T>>> {
         self.0.slot.as_ref()
     }
     
+    /// get the signal
     fn signal(&self) -> &S {
         &self.0.signal
-    }
-    
-    fn fire_recv(&self) -> (T, &S) {
-        let msg = self.take().unwrap();
-        (msg, self.signal())
     }
 
     fn fire_send(&self, msg: T) -> (Option<T>, &S) {
@@ -118,6 +118,10 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
         };
         (ret, self.signal())
     }
+    
+    pub fn fire(&self) -> bool {
+        self.signal().fire()
+    }
 
     pub fn is_empty(&self) -> bool {
         self.slot().map(|slot| slot.lock().unwrap().is_none()).unwrap_or(true)
@@ -125,10 +129,6 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
 
     pub fn take(&self) -> Option<T> {
         self.slot().unwrap().lock().unwrap().take()
-    }
-
-    pub fn fire(&self) -> bool {
-        self.signal().fire()
     }
 }
 
@@ -199,8 +199,8 @@ impl<T> Lockable<T> {
 
             while self.queue.len() < effective_cap {
                 if let Some(s) = send_waiting.signals.pop_front() {
-                    let (msg, signal) = s.fire_recv();
-                    signal.fire();
+                    let msg = s.take().unwrap();
+                    s.fire();
                     self.queue.push_back(msg);
                 } else {
                     break;
@@ -247,8 +247,6 @@ impl<T> Shared<T> {
             loop {
                 let slot = lockable.recv_waiting.pop_front();
                 match slot.as_ref().map(|r| r.fire_send(msg.take().unwrap())) {
-                    // No more waiting receivers and msg in queue, so break out of the loop
-                    None if msg.is_none() => break,
                     // No more waiting receivers, so add msg to queue and break out of the loop
                     None => {
                         lockable.queue.push_back(msg.unwrap());
@@ -258,7 +256,7 @@ impl<T> Shared<T> {
                         if signal.fire() {
                             // Was async and a stream, so didn't acquire the message. Wake another
                             // receiver, and do not yet push the message.
-                            msg.replace(m);
+                            msg.replace(m); // TODO lol
                             continue;
                         } else {
                             // Was async and not a stream, so it did acquire the message. Push the
