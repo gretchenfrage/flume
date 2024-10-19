@@ -217,23 +217,19 @@ impl<'a, T> Future for SendFut<'a, T> {
             let this = self.get_mut();
             let (shared, this_hook) = (&this.sender.0, &mut this.hook);
 
-            shared.send(
-                // item
+            match shared.send(
                 item,
-                // should_block
                 true,
-                // make_signal
                 |msg| Hook::new_slot(Some(msg), AsyncSignal::new(cx, false)),
-                // do_block
-                |hook| {
+            ) {
+                Ok(Some(hook)) => {
                     *this_hook = Some(SendState::QueuedItem(hook));
                     Poll::Pending
-                },
-            )
-                .map(|r| r.map_err(|err| match err {
-                    TrySendTimeoutError::Disconnected(msg) => SendError(msg),
-                    _ => unreachable!(),
-                }))
+                }
+                Ok(None) => Poll::Ready(Ok(())),
+                Err(TrySendTimeoutError::Disconnected(msg)) => Poll::Ready(Err(SendError(msg))),
+                Err(_) => unreachable!(),
+            }
         } else { // Nothing to do
             Poll::Ready(Ok(()))
         }

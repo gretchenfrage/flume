@@ -110,11 +110,11 @@ impl<'a, T> Selector<'a, T> {
             fn init(&mut self) -> Option<T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
-                let r = self.sender.0.send(
-                    self.msg.take().unwrap(),
-                    true,
-                    |msg| {
-                        Hook::new_slot(
+                let r = self.sender.0
+                    .send(
+                        self.msg.take().unwrap(),
+                        true,
+                        |msg| Hook::new_slot(
                             Some(msg),
                             SelectSignal(
                                 thread::current(),
@@ -123,13 +123,10 @@ impl<'a, T> Selector<'a, T> {
                                 signalled,
                             ),
                         )
-                    },
-                    // Always runs
-                    |h| {
+                    )
+                    .map(|hook| if let Some(h) = hook {
                         self.hook = Some(h);
-                        Ok(())
-                    },
-                );
+                    });
 
                 if self.hook.is_none() {
                     Some((self.mapper)(match r {

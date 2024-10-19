@@ -228,17 +228,16 @@ impl<T> Shared<T> {
         }
     }
 
-    fn send<S: Signal, R: From<Result<(), TrySendTimeoutError<T>>>>(
+    fn send<S: Signal>(
         &self,
         msg: T,
         should_block: bool,
         make_signal: impl FnOnce(T) -> Hook<T, S>,
-        do_block: impl FnOnce(Hook<T, S>) -> R,
-    ) -> R { // TODO: this R parameter  thing is weird
+    ) -> Result<Option<Hook<T, S>>, TrySendTimeoutError<T>> {
         let mut lockable = self.lockable.lock().unwrap();
 
         if self.is_disconnected() {
-            Err(TrySendTimeoutError::Disconnected(msg)).into()
+            Err(TrySendTimeoutError::Disconnected(msg))
         } else if !lockable.recv_waiting.is_empty() {
             let mut opt_msg = Some(msg);
 
@@ -268,18 +267,17 @@ impl<T> Shared<T> {
                 });
             }
 
-            Ok(()).into()
+            Ok(None)
         } else if lockable.send_waiting.as_ref().map(|send_waiting| lockable.queue.len() < send_waiting.cap).unwrap_or(true) {
             lockable.queue.push_back(msg);
-            Ok(()).into()
+            Ok(None)
         } else if should_block { // Only bounded from here on
             let hook = make_signal(msg);
             lockable.send_waiting.as_mut().unwrap().signals.push_back(hook.clone().into_dyn());
             drop(lockable);
-
-            do_block(hook)
+            Ok(Some(hook))
         } else {
-            Err(TrySendTimeoutError::Full(msg)).into()
+            Err(TrySendTimeoutError::Full(msg))
         }
     }
 
@@ -288,15 +286,13 @@ impl<T> Shared<T> {
         msg: T,
         block: Option<Option<Instant>>,
     ) -> Result<(), TrySendTimeoutError<T>> {
-        self.send(
-            // msg
+        if let Some(hook) = self.send(
             msg,
-            // should_block
             block.is_some(),
-            // make_signal
             |msg| Hook::new_slot(Some(msg), SyncSignal::default()),
-            // do_block
-            |hook| if let Some(deadline) = block.unwrap() {
+        )? {
+            // TODO: working on this one
+            if let Some(deadline) = block.unwrap() {
                 hook.wait_deadline_send(&self.disconnected, deadline)
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
@@ -312,16 +308,17 @@ impl<T> Shared<T> {
                             Err(TrySendTimeoutError::Timeout(msg))
                         })
                         .unwrap_or(Ok(()))
-                    })
+                    })?;
             } else {
+                // TODO: how is this reachable?
                 hook.wait_send(&self.disconnected);
 
-                match hook.take() {
-                    Some(msg) => Err(TrySendTimeoutError::Disconnected(msg)),
-                    None => Ok(()),
+                if let Some(msg) = hook.take() {
+                    return Err(TrySendTimeoutError::Disconnected(msg));
                 }
-            },
-        )
+            }
+        }
+        Ok(())
     }
 
     fn recv<S: Signal, R: From<Result<T, TryRecvTimeoutError>>>(
