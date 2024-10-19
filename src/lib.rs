@@ -228,70 +228,70 @@ impl<T> Shared<T> {
         }
     }
 
-    fn send<S: Signal>(
+    /// inner routine to send a message into the channel. if should block, calls `make_hook`, adds
+    /// one handle as a `send_waiting` hook, and returns a second handle in `Ok(Some)`.
+    fn send_inner<S: Signal>(
         &self,
         msg: T,
-        should_block: bool,
-        make_signal: impl FnOnce(T) -> Hook<T, S>,
+        may_block: bool,
+        make_hook: impl FnOnce(T) -> Hook<T, S>,
     ) -> Result<Option<Hook<T, S>>, TrySendTimeoutError<T>> {
         let mut lockable = self.lockable.lock().unwrap();
 
         if self.is_disconnected() {
+            // channel disconnected, return error
             Err(TrySendTimeoutError::Disconnected(msg))
         } else if !lockable.recv_waiting.is_empty() {
-            let mut opt_msg = Some(msg);
-
+            // try giving the message to recv_waiting hooks before pushing to the queue
             loop {
-                let msg = opt_msg.unwrap();
-                opt_msg = Some(match lockable.recv_waiting.pop_front() {
+                match lockable.recv_waiting.pop_front() {
                     None => {
+                        // exhausted hooks, push to queue
                         lockable.queue.push_back(msg);
-                        break
+                        break;
                     }
                     Some(hook) => if let Some(slot) = hook.slot() {
+                        // hook with a slot (sync). give the message to the hook and fire it.
                         *slot.lock().unwrap() = Some(msg);
                         drop(lockable);
                         hook.signal().fire();
-                        break // Was sync, so it has acquired the message
-                    } else if hook.signal().fire() {
-                        // Was async and a stream, so didn't acquire the message. Wake another
-                        // receiver, and do not yet push the message.
-                        msg
-                    } else {
-                        // Was async and not a stream, so it did acquire the message. Push the
-                        // message to the queue for it to be received.
+                        break;
+                    } else if !hook.signal().fire() {
+                        // non-stream hook without slot (async non-stream). it was fired. push the
+                        // message to the queue to it can be taken.
                         lockable.queue.push_back(msg);
-                        drop(lockable);
-                        break
+                        break;
                     }
-                });
+                }
             }
-
             Ok(None)
         } else if lockable.send_waiting.as_ref().map(|send_waiting| lockable.queue.len() < send_waiting.cap).unwrap_or(true) {
+            // simply put the message in the queue
             lockable.queue.push_back(msg);
             Ok(None)
-        } else if should_block { // Only bounded from here on
-            let hook = make_signal(msg);
+        } else if may_block {
+            // queue is full, create a hook, put one handle in `send_waiting` and return another
+            let hook = make_hook(msg);
             lockable.send_waiting.as_mut().unwrap().signals.push_back(hook.clone().into_dyn());
             drop(lockable);
             Ok(Some(hook))
         } else {
+            // queue is full and blocking is not allowed
             Err(TrySendTimeoutError::Full(msg))
         }
     }
 
-    fn send_sync(
+    /// call `send_inner` and uses a `SyncSignal` to block if necessary.
+    fn send_blocking(
         &self,
         msg: T,
         block: Option<Option<Instant>>,
     ) -> Result<(), TrySendTimeoutError<T>> {
-        if let Some(hook) = self.send(
+        if let Some(hook) = self.send_inner(
             msg,
             block.is_some(),
             |msg| Hook::new_slot(Some(msg), SyncSignal::default()),
         )? {
-            // TODO: working on this one
             if let Some(deadline) = block.unwrap() {
                 hook.wait_deadline_send(&self.disconnected, deadline)
                     .or_else(|timed_out| {
@@ -310,7 +310,6 @@ impl<T> Shared<T> {
                         .unwrap_or(Ok(()))
                     })?;
             } else {
-                // TODO: how is this reachable?
                 hook.wait_send(&self.disconnected);
 
                 if let Some(msg) = hook.take() {
@@ -440,7 +439,7 @@ pub struct Receiver<T>(Arc<Shared<T>>);
 
 impl<T> Sender<T> {
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {
-        self.0.send_sync(msg, None).map_err(|err| match err {
+        self.0.send_blocking(msg, None).map_err(|err| match err {
             TrySendTimeoutError::Full(msg) => TrySendError::Full(msg),
             TrySendTimeoutError::Disconnected(msg) => TrySendError::Disconnected(msg),
             _ => unreachable!(),
@@ -448,14 +447,14 @@ impl<T> Sender<T> {
     }
 
     pub fn send(&self, msg: T) -> Result<(), SendError<T>> {
-        self.0.send_sync(msg, Some(None)).map_err(|err| match err {
+        self.0.send_blocking(msg, Some(None)).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendError(msg),
             _ => unreachable!(),
         })
     }
 
     pub fn send_deadline(&self, msg: T, deadline: Instant) -> Result<(), SendTimeoutError<T>> {
-        self.0.send_sync(msg, Some(Some(deadline))).map_err(|err| match err {
+        self.0.send_blocking(msg, Some(Some(deadline))).map_err(|err| match err {
             TrySendTimeoutError::Disconnected(msg) => SendTimeoutError::Disconnected(msg),
             TrySendTimeoutError::Timeout(msg) => SendTimeoutError::Timeout(msg),
             _ => unreachable!(),

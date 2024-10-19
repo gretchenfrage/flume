@@ -111,7 +111,7 @@ impl<'a, T> Selector<'a, T> {
                 let token = self.token;
                 let signalled = self.signalled.clone();
                 let r = self.sender.0
-                    .send(
+                    .send_inner(
                         self.msg.take().unwrap(),
                         true,
                         |msg| Hook::new_slot(

@@ -217,7 +217,7 @@ impl<'a, T> Future for SendFut<'a, T> {
             let this = self.get_mut();
             let (shared, this_hook) = (&this.sender.0, &mut this.hook);
 
-            match shared.send(
+            match shared.send_inner(
                 item,
                 true,
                 |msg| Hook::new_slot(Some(msg), AsyncSignal::new(cx, false)),
