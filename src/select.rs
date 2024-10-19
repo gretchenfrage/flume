@@ -157,12 +157,7 @@ impl<'a, T> Selector<'a, T> {
             fn deinit(&mut self) {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
-                    self.sender.0.lockable.lock().unwrap()
-                        .send_waiting
-                        .as_mut()
-                        .unwrap()
-                        .hooks
-                        .retain(|s| *s != hook);
+                    self.sender.0.lockable.lock().unwrap().remove_send_hook(&hook);
                 }
             }
         }
@@ -248,9 +243,7 @@ impl<'a, T> Selector<'a, T> {
             fn deinit(&mut self) {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
-                    self.receiver.0.lockable.lock().unwrap()
-                        .recv_waiting
-                        .retain(|s| *s != hook);
+                    self.receiver.0.lockable.lock().unwrap().remove_recv_hook(&hook);
                     // If we were woken, but never polled, wake up another
                     if !self.received
                         && hook

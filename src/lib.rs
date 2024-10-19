@@ -215,6 +215,16 @@ impl<T> Lockable<T> {
             while Some(false) == self.recv_waiting.pop_front().map(|s| s.signal().fire()) {}
         }
     }
+    
+    /// unwrap send_waiting and remove `hook` if present. this is O(N).
+    fn remove_send_hook<S: ?Sized>(&mut self, hook: &Hook<T, S>) {
+        self.send_waiting.as_mut().unwrap().hooks.retain(|s| s != hook);
+    }
+    
+    /// remove `hook` from `recv_waiting` if present. this is O(N).
+    fn remove_recv_hook<S: ?Sized>(&mut self, hook: &Hook<T, S>) {
+        self.recv_waiting.retain(|s| s != hook);
+    }
 }
 
 impl<T> Shared<T> {
@@ -362,7 +372,7 @@ pub struct Sender<T>(Arc<Shared<T>>);
 pub struct Receiver<T>(Arc<Shared<T>>);
 
 impl<T> Sender<T> {
-    /// call `send_inner` and uses a `SyncSignal` to block if necessary.
+    /// call `send_inner` and uses a `SyncSignal` to block if necessary
     fn send_inner(
         &self,
         msg: T,
@@ -378,17 +388,15 @@ impl<T> Sender<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook = hook.clone();
-                            self.0.lockable.lock().unwrap().send_waiting
-                                .as_mut()
-                                .unwrap().hooks
-                                .retain(|s| *s != hook);
+                            self.0.lockable.lock().unwrap().remove_send_hook(&hook);
                         }
-                        hook.take().map(|msg| if self.is_disconnected() {
-                            Err(TrySendTimeoutError::Disconnected(msg))
-                        } else {
-                            Err(TrySendTimeoutError::Timeout(msg))
-                        })
-                        .unwrap_or(Ok(()))
+                        hook.take()
+                            .map(|msg| if self.is_disconnected() {
+                                Err(TrySendTimeoutError::Disconnected(msg))
+                            } else {
+                                Err(TrySendTimeoutError::Timeout(msg))
+                            })
+                            .unwrap_or(Ok(()))
                     })?;
             } else {
                 hook.wait_send(&self.0.disconnected);
@@ -502,8 +510,7 @@ impl<T> Receiver<T> {
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
                             let hook = hook.clone();
-                            self.0.lockable.lock().unwrap().recv_waiting
-                                .retain(|s| *s != hook);
+                            self.0.lockable.lock().unwrap().remove_recv_hook(&hook);
                         }
                         match hook.take() {
                             Some(msg) => Ok(msg),

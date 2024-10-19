@@ -154,10 +154,7 @@ impl<'a, T> SendFut<'a, T> {
     /// on drop and just before `start_send` in the `Sink` implementation.
     fn reset_hook(&mut self) {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
-            self.sender.0.lockable.lock().unwrap().send_waiting
-                .as_mut()
-                .unwrap().hooks
-                .retain(|s| *s != hook);
+            self.sender.0.lockable.lock().unwrap().remove_send_hook(&hook);
         }
     }
 
@@ -370,8 +367,7 @@ impl<'a, T> RecvFut<'a, T> {
     fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
             let mut lockable = self.receiver.0.lockable.lock().unwrap();
-            // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
-            lockable.recv_waiting.retain(|s| *s != hook);
+            lockable.remove_recv_hook(&hook);
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
