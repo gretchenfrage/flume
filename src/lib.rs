@@ -35,29 +35,43 @@ enum TryRecvTimeoutError {
     Disconnected,
 }
 
-struct HookInner<T, S: ?Sized> {
-    slot: Option<Mutex<Option<T>>>,
-    signal: S
-}
-
-struct Hook<T, S: ?Sized>(Arc<HookInner<T, S>>);
-
+/// shared channel state
 struct Shared<T> {
+    /// lockable channel state
     lockable: Mutex<Lockable<T>>,
+    /// whether the channel is disconnected
     disconnected: AtomicBool,
-    sender_count: AtomicUsize,
-    receiver_count: AtomicUsize,
+    /// sender ref count
+    send_count: AtomicUsize,
+    /// receiver ref count
+    recv_count: AtomicUsize,
 }
 
+/// lockable channel state
 struct Lockable<T> {
-    send_waiting: Option<SendWaiting<T>>,
+    /// messages in the channel
     queue: VecDeque<T>,
+    /// if the channel is bounded, state for things blocking on sending
+    send_waiting: Option<SendWaiting<T>>,
+    /// hook for each thread-like blocking on receiving a message
     recv_waiting: VecDeque<Hook<T, dyn Signal>>,
 }
 
+/// see Lockable.send_waiting
 struct SendWaiting<T> {
+    /// channel capacity
     cap: usize,
+    /// hook for each thread-like blocking on sending a message
     signals: VecDeque<Hook<T, dyn Signal>>,
+}
+
+/// reference-counted struct of optional mutex-guarded message "slot" plus dyn-able notify signal
+struct Hook<T, S: ?Sized>(Arc<HookInner<T, S>>);
+
+/// see Hook
+struct HookInner<T, S: ?Sized> {
+    slot: Option<Mutex<Option<T>>>,
+    signal: S
 }
 
 impl<T, S: Signal> Hook<T, S> {
@@ -211,8 +225,8 @@ impl<T> Shared<T> {
                 recv_waiting: VecDeque::new(),
             }),
             disconnected: AtomicBool::new(false),
-            sender_count: AtomicUsize::new(1),
-            receiver_count: AtomicUsize::new(1),
+            send_count: AtomicUsize::new(1),
+            recv_count: AtomicUsize::new(1),
         }
     }
 
@@ -422,11 +436,11 @@ impl<T> Shared<T> {
     }
 
     fn sender_count(&self) -> usize {
-        self.sender_count.load(Ordering::Relaxed)
+        self.send_count.load(Ordering::Relaxed)
     }
 
     fn receiver_count(&self) -> usize {
-        self.receiver_count.load(Ordering::Relaxed)
+        self.recv_count.load(Ordering::Relaxed)
     }
 }
 
@@ -504,7 +518,7 @@ impl<T> Sender<T> {
 
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.0.sender_count.fetch_add(1, Ordering::Relaxed);
+        self.0.send_count.fetch_add(1, Ordering::Relaxed);
         Self(self.0.clone())
     }
 }
@@ -518,7 +532,7 @@ impl<T> fmt::Debug for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         // Notify receivers that all senders have been dropped if the number of senders drops to 0.
-        if self.0.sender_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+        if self.0.send_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.0.disconnect_all();
         }
     }
@@ -603,7 +617,7 @@ impl<T> Receiver<T> {
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.0.receiver_count.fetch_add(1, Ordering::Relaxed);
+        self.0.recv_count.fetch_add(1, Ordering::Relaxed);
         Self(self.0.clone())
     }
 }
@@ -618,7 +632,7 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         // Notify senders that all receivers have been dropped if the number of receivers drops
         // to 0.
-        if self.0.receiver_count.fetch_sub(1, Ordering::Relaxed) == 1 {
+        if self.0.recv_count.fetch_sub(1, Ordering::Relaxed) == 1 {
             self.0.disconnect_all();
         }
     }

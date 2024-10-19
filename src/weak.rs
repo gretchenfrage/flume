@@ -12,7 +12,7 @@ impl<T> WeakSender<T> {
             // check that there are still live senders
             .filter(|shared| {
                 shared
-                    .sender_count
+                    .send_count
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                         if count == 0 {
                             // all senders are closed already -> don't increase the sender count
