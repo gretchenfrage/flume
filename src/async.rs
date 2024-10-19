@@ -134,7 +134,6 @@ enum SendState<T> {
 /// A future that sends a value into a channel.
 ///
 /// Can be created via [`Sender::send_async`] or [`Sender::into_send_async`].
-#[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
 pub struct SendFut<'a, T> {
     sender: OwnedOrRef<'a, Sender<T>>,
     // Only none after dropping
@@ -347,7 +346,6 @@ impl<T> Receiver<T> {
 /// A future which allows asynchronously receiving a message.
 ///
 /// Can be created via [`Receiver::recv_async`] or [`Receiver::into_recv_async`].
-#[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"] // TODO these are obsolete
 pub struct RecvFut<'a, T> {
     receiver: OwnedOrRef<'a, Receiver<T>>,
     hook: Option<Hook<T, AsyncSignal>>,

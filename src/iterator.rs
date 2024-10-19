@@ -61,17 +61,11 @@ impl<'a, T> Iterator for TryIter<'a, T> {
 
 /// An fixed-sized iterator over the msgs drained from a channel.
 #[derive(Debug)]
-pub struct Drain<'a, T> {
-    pub(crate) queue: VecDeque<T>,
-    /// A phantom field used to constrain the lifetime of this iterator. We do this because the
-    /// implementation may change and we don't want to unintentionally constrain it. Removing this
-    /// lifetime later is a possibility.
-    /// 
-    /// TODO: just do get rid of it.
-    pub(crate) _phantom: PhantomData<&'a ()>,
+pub struct Drain<T> {
+    pub(crate) queue: VecDeque<T>
 }
 
-impl<'a, T> Iterator for Drain<'a, T> {
+impl<T> Iterator for Drain<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -79,7 +73,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
     }
 }
 
-impl<'a, T> ExactSizeIterator for Drain<'a, T> {
+impl<T> ExactSizeIterator for Drain<T> {
     fn len(&self) -> usize {
         self.queue.len()
     }

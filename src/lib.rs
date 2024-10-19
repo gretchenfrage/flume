@@ -16,7 +16,6 @@ use std::{
     collections::VecDeque,
     sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Weak, Mutex},
     time::{Duration, Instant},
-    marker::PhantomData,
     thread,
     fmt::{self, Formatter},
 };
@@ -573,7 +572,7 @@ impl<T> Receiver<T> {
         lockable.pull_pending(false);
         let queue = std::mem::take(&mut lockable.queue);
 
-        Drain { queue, _phantom: PhantomData }
+        Drain { queue }
     }
 
     pub fn is_disconnected(&self) -> bool {
