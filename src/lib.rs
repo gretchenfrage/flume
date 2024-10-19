@@ -15,7 +15,7 @@ pub use self::weak::*;
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Weak, Mutex, MutexGuard},
+    sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}, Weak, Mutex},
     time::{Duration, Instant},
     marker::PhantomData,
     thread,
@@ -35,18 +35,12 @@ enum TryRecvTimeoutError {
     Disconnected,
 }
 
-struct Hook<T, S: ?Sized> {
+struct HookInner<T, S: ?Sized> {
     slot: Option<Mutex<Option<T>>>,
     signal: S
 }
 
-type SignalVec<T> = VecDeque<Arc<Hook<T, dyn signal::Signal>>>;
-
-struct Lockable<T> {
-    sending: Option<(usize, SignalVec<T>)>,
-    queue: VecDeque<T>,
-    waiting: SignalVec<T>,
-}
+struct Hook<T, S: ?Sized>(Arc<HookInner<T, S>>);
 
 struct Shared<T> {
     lockable: Mutex<Lockable<T>>,
@@ -55,34 +49,55 @@ struct Shared<T> {
     receiver_count: AtomicUsize,
 }
 
-pub struct Sender<T>(Arc<Shared<T>>);
+struct Lockable<T> {
+    send_waiting: Option<SendWaiting<T>>,
+    queue: VecDeque<T>,
+    recv_waiting: VecDeque<Hook<T, dyn Signal>>,
+}
 
-pub struct Receiver<T>(Arc<Shared<T>>);
+struct SendWaiting<T> {
+    cap: usize,
+    signals: VecDeque<Hook<T, dyn Signal>>,
+}
 
-
-impl<T, S: ?Sized + Signal> Hook<T, S> {
-    pub fn slot(msg: Option<T>, signal: S) -> Arc<Self>
-    where
-        S: Sized,
-    {
-        Arc::new(Self { slot: Some(Mutex::new(msg)), signal })
+impl<T, S: Signal> Hook<T, S> {
+    fn new_slot(msg: Option<T>, signal: S) -> Self {
+        Self(Arc::new(HookInner { slot: Some(Mutex::new(msg)), signal }))
     }
+    
+    fn new_trigger(signal: S) -> Self {
+        Self(Arc::new(HookInner { slot: None, signal }))
+    }
+    
+    fn into_dyn(self) -> Hook<T, dyn Signal> {
+        Hook(self.0)
+    }
+}
 
-    fn lock(&self) -> Option<MutexGuard<'_, Option<T>>> {
-        self.slot.as_ref().map(|s| s.lock().unwrap())
+impl<T, S: ?Sized + Signal> Clone for Hook<T, S> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
     }
 }
 
 impl<T, S: ?Sized + Signal> Hook<T, S> {
-    pub fn fire_recv(&self) -> (T, &S) {
-        let msg = self.lock().unwrap().take().unwrap();
+    fn slot(&self) -> Option<&Mutex<Option<T>>> {
+        self.0.slot.as_ref()
+    }
+    
+    fn signal(&self) -> &S {
+        &self.0.signal
+    }
+    
+    fn fire_recv(&self) -> (T, &S) {
+        let msg = self.take().unwrap();
         (msg, self.signal())
     }
 
-    pub fn fire_send(&self, msg: T) -> (Option<T>, &S) {
-        let ret = match self.lock() {
-            Some(mut lock) => {
-                *lock = Some(msg);
+    fn fire_send(&self, msg: T) -> (Option<T>, &S) {
+        let ret = match self.slot() {
+            Some(slot) => {
+                *slot.lock().unwrap() = Some(msg);
                 None
             }
             None => Some(msg),
@@ -91,25 +106,14 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.lock().map(|s| s.is_none()).unwrap_or(true)
+        self.slot().map(|slot| slot.lock().unwrap().is_none()).unwrap_or(true)
     }
 
-    pub fn try_take(&self) -> Option<T> {
-        self.lock().unwrap().take()
+    pub fn take(&self) -> Option<T> {
+        self.slot().unwrap().lock().unwrap().take()
     }
 
-    pub fn trigger(signal: S) -> Arc<Self>
-    where
-        S: Sized,
-    {
-        Arc::new(Self { slot: None, signal })
-    }
-
-    pub fn signal(&self) -> &S {
-        &self.signal
-    }
-
-    pub fn fire_nothing(&self) -> bool {
+    pub fn fire(&self) -> bool {
         self.signal().fire()
     }
 }
@@ -118,7 +122,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_recv(&self, abort: &AtomicBool) -> Option<T> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            let msg = self.lock().unwrap().take();
+            let msg = self.take();
             if let Some(msg) = msg {
                 break Some(msg);
             } else if disconnected {
@@ -133,7 +137,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_deadline_recv(&self, abort: &AtomicBool, deadline: Instant) -> Result<T, bool> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            let msg = self.lock().unwrap().take();
+            let msg = self.take();
             if let Some(msg) = msg {
                 break Ok(msg);
             } else if disconnected {
@@ -149,7 +153,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_send(&self, abort: &AtomicBool) {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            if disconnected || self.lock().unwrap().is_none() {
+            if disconnected || self.is_empty() {
                 break;
             }
 
@@ -161,7 +165,7 @@ impl<T> Hook<T, SyncSignal> {
     pub fn wait_deadline_send(&self, abort: &AtomicBool, deadline: Instant) -> Result<(), bool> {
         loop {
             let disconnected = abort.load(Ordering::SeqCst); // Check disconnect *before* msg
-            if self.lock().unwrap().is_none() {
+            if self.is_empty() {
                 break Ok(());
             } else if disconnected {
                 break Err(false);
@@ -176,11 +180,11 @@ impl<T> Hook<T, SyncSignal> {
 
 impl<T> Lockable<T> {
     fn pull_pending(&mut self, pull_extra: bool) {
-        if let Some((cap, sending)) = &mut self.sending {
-            let effective_cap = *cap + pull_extra as usize;
+        if let Some(send_waiting) = &mut self.send_waiting {
+            let effective_cap = send_waiting.cap + pull_extra as usize;
 
             while self.queue.len() < effective_cap {
-                if let Some(s) = sending.pop_front() {
+                if let Some(s) = send_waiting.signals.pop_front() {
                     let (msg, signal) = s.fire_recv();
                     signal.fire();
                     self.queue.push_back(msg);
@@ -193,7 +197,7 @@ impl<T> Lockable<T> {
 
     fn try_wake_receiver_if_pending(&mut self) {
         if !self.queue.is_empty() {
-            while Some(false) == self.waiting.pop_front().map(|s| s.fire_nothing()) {}
+            while Some(false) == self.recv_waiting.pop_front().map(|s| s.fire()) {}
         }
     }
 }
@@ -202,9 +206,9 @@ impl<T> Shared<T> {
     fn new(cap: Option<usize>) -> Self {
         Self {
             lockable: Mutex::new(Lockable {
-                sending: cap.map(|cap| (cap, VecDeque::new())),
+                send_waiting: cap.map(|cap| SendWaiting { cap, signals: VecDeque::new() }),
                 queue: VecDeque::new(),
-                waiting: VecDeque::new(),
+                recv_waiting: VecDeque::new(),
             }),
             disconnected: AtomicBool::new(false),
             sender_count: AtomicUsize::new(1),
@@ -216,18 +220,18 @@ impl<T> Shared<T> {
         &self,
         msg: T,
         should_block: bool,
-        make_signal: impl FnOnce(T) -> Arc<Hook<T, S>>,
-        do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
+        make_signal: impl FnOnce(T) -> Hook<T, S>,
+        do_block: impl FnOnce(Hook<T, S>) -> R,
     ) -> R {
         let mut lockable = self.lockable.lock().unwrap();
 
         if self.is_disconnected() {
             Err(TrySendTimeoutError::Disconnected(msg)).into()
-        } else if !lockable.waiting.is_empty() {
+        } else if !lockable.recv_waiting.is_empty() {
             let mut msg = Some(msg);
 
             loop {
-                let slot = lockable.waiting.pop_front();
+                let slot = lockable.recv_waiting.pop_front();
                 match slot.as_ref().map(|r| r.fire_send(msg.take().unwrap())) {
                     // No more waiting receivers and msg in queue, so break out of the loop
                     None if msg.is_none() => break,
@@ -259,12 +263,12 @@ impl<T> Shared<T> {
             }
 
             Ok(()).into()
-        } else if lockable.sending.as_ref().map(|(cap, _)| lockable.queue.len() < *cap).unwrap_or(true) {
+        } else if lockable.send_waiting.as_ref().map(|send_waiting| lockable.queue.len() < send_waiting.cap).unwrap_or(true) {
             lockable.queue.push_back(msg);
             Ok(()).into()
         } else if should_block { // Only bounded from here on
             let hook = make_signal(msg);
-            lockable.sending.as_mut().unwrap().1.push_back(hook.clone());
+            lockable.send_waiting.as_mut().unwrap().signals.push_back(hook.clone().into_dyn());
             drop(lockable);
 
             do_block(hook)
@@ -284,19 +288,19 @@ impl<T> Shared<T> {
             // should_block
             block.is_some(),
             // make_signal
-            |msg| Hook::slot(Some(msg), SyncSignal::default()),
+            |msg| Hook::new_slot(Some(msg), SyncSignal::default()),
             // do_block
             |hook| if let Some(deadline) = block.unwrap() {
                 hook.wait_deadline_send(&self.disconnected, deadline)
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
-                            let hook: Arc<Hook<T, dyn signal::Signal>> = hook.clone();
-                            self.lockable.lock().unwrap().sending
+                            let hook = hook.clone();
+                            self.lockable.lock().unwrap().send_waiting
                                 .as_mut()
-                                .unwrap().1
+                                .unwrap().signals
                                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                         }
-                        hook.try_take().map(|msg| if self.is_disconnected() {
+                        hook.take().map(|msg| if self.is_disconnected() {
                             Err(TrySendTimeoutError::Disconnected(msg))
                         } else {
                             Err(TrySendTimeoutError::Timeout(msg))
@@ -306,7 +310,7 @@ impl<T> Shared<T> {
             } else {
                 hook.wait_send(&self.disconnected);
 
-                match hook.try_take() {
+                match hook.take() {
                     Some(msg) => Err(TrySendTimeoutError::Disconnected(msg)),
                     None => Ok(()),
                 }
@@ -317,8 +321,8 @@ impl<T> Shared<T> {
     fn recv<S: Signal, R: From<Result<T, TryRecvTimeoutError>>>(
         &self,
         should_block: bool,
-        make_signal: impl FnOnce() -> Arc<Hook<T, S>>,
-        do_block: impl FnOnce(Arc<Hook<T, S>>) -> R,
+        make_signal: impl FnOnce() -> Hook<T, S>,
+        do_block: impl FnOnce(Hook<T, S>) -> R,
     ) -> R {
         let mut lockable = self.lockable.lock().unwrap();
         lockable.pull_pending(true);
@@ -331,7 +335,7 @@ impl<T> Shared<T> {
             Err(TryRecvTimeoutError::Disconnected).into()
         } else if should_block {
             let hook = make_signal();
-            lockable.waiting.push_back(hook.clone());
+            lockable.recv_waiting.push_back(hook.clone().into_dyn());
             drop(lockable);
 
             do_block(hook)
@@ -346,17 +350,17 @@ impl<T> Shared<T> {
             // should_block
             block.is_some(),
             // make_signal
-            || Hook::slot(None, SyncSignal::default()),
+            || Hook::new_slot(None, SyncSignal::default()),
             // do_block
             |hook| if let Some(deadline) = block.unwrap() {
                 hook.wait_deadline_recv(&self.disconnected, deadline)
                     .or_else(|timed_out| {
                         if timed_out { // Remove our signal
-                            let hook: Arc<Hook<T, dyn Signal>> = hook.clone();
-                            self.lockable.lock().unwrap().waiting
+                            let hook = hook.clone();
+                            self.lockable.lock().unwrap().recv_waiting
                                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                         }
-                        match hook.try_take() {
+                        match hook.take() {
                             Some(msg) => Ok(msg),
                             None => {
                                 let disconnected = self.is_disconnected(); // Check disconnect *before* msg
@@ -385,12 +389,12 @@ impl<T> Shared<T> {
 
         let mut lockable = self.lockable.lock().unwrap();
         lockable.pull_pending(false);
-        if let Some((_, sending)) = lockable.sending.as_ref() {
-            sending.iter().for_each(|hook| {
+        if let Some(send_waiting) = lockable.send_waiting.as_ref() {
+            send_waiting.signals.iter().for_each(|hook| {
                 hook.signal().fire();
             })
         }
-        lockable.waiting.iter().for_each(|hook| {
+        lockable.recv_waiting.iter().for_each(|hook| {
             hook.signal().fire();
         });
     }
@@ -414,7 +418,7 @@ impl<T> Shared<T> {
     }
 
     fn capacity(&self) -> Option<usize> {
-        self.lockable.lock().unwrap().sending.as_ref().map(|(cap, _)| *cap)
+        self.lockable.lock().unwrap().send_waiting.as_ref().map(|send_waiting| send_waiting.cap)
     }
 
     fn sender_count(&self) -> usize {
@@ -425,6 +429,11 @@ impl<T> Shared<T> {
         self.receiver_count.load(Ordering::Relaxed)
     }
 }
+
+
+pub struct Sender<T>(Arc<Shared<T>>);
+
+pub struct Receiver<T>(Arc<Shared<T>>);
 
 impl<T> Sender<T> {
     pub fn try_send(&self, msg: T) -> Result<(), TrySendError<T>> {

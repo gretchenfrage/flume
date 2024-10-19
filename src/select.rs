@@ -98,7 +98,7 @@ impl<'a, T> Selector<'a, T> {
             msg: Option<U>,
             token: usize,
             signalled: Arc<Spinlock<VecDeque<usize>>>,
-            hook: Option<Arc<Hook<U, SelectSignal>>>,
+            hook: Option<Hook<U, SelectSignal>>,
             mapper: F,
             phantom: PhantomData<T>,
         }
@@ -114,7 +114,7 @@ impl<'a, T> Selector<'a, T> {
                     self.msg.take().unwrap(),
                     true,
                     |msg| {
-                        Hook::slot(
+                        Hook::new_slot(
                             Some(msg),
                             SelectSignal(
                                 thread::current(),
@@ -145,7 +145,7 @@ impl<'a, T> Selector<'a, T> {
             fn poll(&mut self) -> Option<T> {
                 let res = if self.sender.0.is_disconnected() {
                     // Check the hook one last time
-                    if let Some(msg) = self.hook.as_ref()?.try_take() {
+                    if let Some(msg) = self.hook.as_ref()?.take() {
                         Err(SendError(msg))
                     } else {
                         Ok(())
@@ -163,12 +163,11 @@ impl<'a, T> Selector<'a, T> {
             fn deinit(&mut self) {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
-                    let hook: Arc<Hook<U, dyn Signal>> = hook;
                     self.sender.0.lockable.lock().unwrap()
-                        .sending
+                        .send_waiting
                         .as_mut()
                         .unwrap()
-                        .1
+                        .signals
                         .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                 }
             }
@@ -200,7 +199,7 @@ impl<'a, T> Selector<'a, T> {
             receiver: &'a Receiver<U>,
             token: usize,
             signalled: Arc<Spinlock<VecDeque<usize>>>,
-            hook: Option<Arc<Hook<U, SelectSignal>>>,
+            hook: Option<Hook<U, SelectSignal>>,
             mapper: F,
             received: bool,
             phantom: PhantomData<T>,
@@ -216,7 +215,7 @@ impl<'a, T> Selector<'a, T> {
                 let r = self.receiver.0.recv(
                     true,
                     || {
-                        Hook::trigger(SelectSignal(
+                        Hook::new_trigger(SelectSignal(
                             thread::current(),
                             token,
                             AtomicBool::new(false),
@@ -257,9 +256,8 @@ impl<'a, T> Selector<'a, T> {
             fn deinit(&mut self) {
                 if let Some(hook) = self.hook.take() {
                     // Remove hook
-                    let hook: Arc<Hook<U, dyn Signal>> = hook;
                     self.receiver.0.lockable.lock().unwrap()
-                        .waiting
+                        .recv_waiting
                         .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
                     // If we were woken, but never polled, wake up another
                     if !self.received

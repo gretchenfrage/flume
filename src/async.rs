@@ -44,8 +44,8 @@ impl<T> Hook<T, AsyncSignal> {
     // Update the hook to point to the given Waker.
     // Returns whether the hook has been previously awakened
     fn update_waker(&self, cx_waker: &Waker) -> bool {
-        let mut waker = self.signal.waker.lock();
-        let woken = self.signal.woken.load(Ordering::SeqCst);
+        let mut waker = self.signal().waker.lock();
+        let woken = self.signal().woken.load(Ordering::SeqCst);
         if !waker.will_wake(cx_waker) {
             *waker = cx_waker.clone();
 
@@ -129,7 +129,7 @@ impl<T> Sender<T> {
 
 enum SendState<T> {
     NotYetSent(T),
-    QueuedItem(Arc<Hook<T, AsyncSignal>>),
+    QueuedItem(Hook<T, AsyncSignal>),
 }
 
 /// A future that sends a value into a channel.
@@ -155,10 +155,9 @@ impl<'a, T> SendFut<'a, T> {
     /// on drop and just before `start_send` in the `Sink` implementation.
     fn reset_hook(&mut self) {
         if let Some(SendState::QueuedItem(hook)) = self.hook.take() {
-            let hook: Arc<Hook<T, dyn Signal>> = hook;
-            self.sender.0.lockable.lock().unwrap().sending
+            self.sender.0.lockable.lock().unwrap().send_waiting
                 .as_mut()
-                .unwrap().1
+                .unwrap().signals
                 .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
         }
     }
@@ -204,7 +203,7 @@ impl<'a, T> Future for SendFut<'a, T> {
             if hook.is_empty() {
                 Poll::Ready(Ok(()))
             } else if self.sender.0.is_disconnected() {
-                let item = hook.try_take();
+                let item = hook.take();
                 self.hook = None;
                 match item {
                     Some(item) => Poll::Ready(Err(SendError(item))),
@@ -224,7 +223,7 @@ impl<'a, T> Future for SendFut<'a, T> {
                 // should_block
                 true,
                 // make_signal
-                |msg| Hook::slot(Some(msg), AsyncSignal::new(cx, false)),
+                |msg| Hook::new_slot(Some(msg), AsyncSignal::new(cx, false)),
                 // do_block
                 |hook| {
                     *this_hook = Some(SendState::QueuedItem(hook));
@@ -356,10 +355,10 @@ impl<T> Receiver<T> {
 /// A future which allows asynchronously receiving a message.
 ///
 /// Can be created via [`Receiver::recv_async`] or [`Receiver::into_recv_async`].
-#[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
+#[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"] // TODO these are obsolete
 pub struct RecvFut<'a, T> {
     receiver: OwnedOrRef<'a, Receiver<T>>,
-    hook: Option<Arc<Hook<T, AsyncSignal>>>,
+    hook: Option<Hook<T, AsyncSignal>>,
 }
 
 impl<'a, T> RecvFut<'a, T> {
@@ -375,10 +374,9 @@ impl<'a, T> RecvFut<'a, T> {
     /// This is called on drop and after a new item is received in `Stream::poll_next`.
     fn reset_hook(&mut self) {
         if let Some(hook) = self.hook.take() {
-            let hook: Arc<Hook<T, dyn Signal>> = hook;
             let mut lockable = self.receiver.0.lockable.lock().unwrap();
             // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
-            lockable.waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+            lockable.recv_waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
@@ -401,13 +399,13 @@ impl<'a, T> RecvFut<'a, T> {
                 _ => (),
             }
 
-            let hook = self.hook.as_ref().map(Arc::clone).unwrap();
+            let hook = self.hook.clone().unwrap();
             if hook.update_waker(cx.waker()) {
                 // If the previous hook was awakened, we need to insert it back to the
                 // queue, otherwise, it remains valid.
                 self.receiver.0.lockable.lock().unwrap()
-                    .waiting
-                    .push_back(hook);
+                    .recv_waiting
+                    .push_back(hook.into_dyn());
             }
             // To avoid a missed wakeup, re-check disconnect status here because the channel might have
             // gotten shut down before we had a chance to push our hook
@@ -432,7 +430,7 @@ impl<'a, T> RecvFut<'a, T> {
                 // should_block
                 true,
                 // make_signal
-                || Hook::trigger(AsyncSignal::new(cx, stream)),
+                || Hook::new_trigger(AsyncSignal::new(cx, stream)),
                 // do_block
                 |hook| {
                     *this_hook = Some(hook);
