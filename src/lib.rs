@@ -107,17 +107,6 @@ impl<T, S: ?Sized + Signal> Hook<T, S> {
     fn signal(&self) -> &S {
         &self.0.signal
     }
-
-    fn fire_send(&self, msg: T) -> (Option<T>, &S) {
-        let ret = match self.slot() {
-            Some(slot) => {
-                *slot.lock().unwrap() = Some(msg);
-                None
-            }
-            None => Some(msg),
-        };
-        (ret, self.signal())
-    }
     
     pub fn fire(&self) -> bool {
         self.signal().fire()
@@ -236,7 +225,7 @@ impl<T> Shared<T> {
         should_block: bool,
         make_signal: impl FnOnce(T) -> Hook<T, S>,
         do_block: impl FnOnce(Hook<T, S>) -> R,
-    ) -> R {
+    ) -> R { // TODO: this R parameter  thing is weird
         let mut lockable = self.lockable.lock().unwrap();
 
         if self.is_disconnected() {
@@ -251,25 +240,21 @@ impl<T> Shared<T> {
                         lockable.queue.push_back(msg);
                         break
                     }
-                    Some(slot) => match slot.fire_send(msg) {
-                        (Some(m), signal) => {
-                            if signal.fire() {
-                                // Was async and a stream, so didn't acquire the message. Wake another
-                                // receiver, and do not yet push the message.
-                                m
-                            } else {
-                                // Was async and not a stream, so it did acquire the message. Push the
-                                // message to the queue for it to be received.
-                                lockable.queue.push_back(m);
-                                drop(lockable);
-                                break
-                            }
-                        },
-                        (None, signal) => {
-                            drop(lockable);
-                            signal.fire();
-                            break // Was sync, so it has acquired the message
-                        },
+                    Some(hook) => if let Some(slot) = hook.slot() {
+                        *slot.lock().unwrap() = Some(msg);
+                        drop(lockable);
+                        hook.fire();
+                        break // Was sync, so it has acquired the message
+                    } else if hook.fire() {
+                        // Was async and a stream, so didn't acquire the message. Wake another
+                        // receiver, and do not yet push the message.
+                        msg
+                    } else {
+                        // Was async and not a stream, so it did acquire the message. Push the
+                        // message to the queue for it to be received.
+                        lockable.queue.push_back(msg);
+                        drop(lockable);
+                        break
                     }
                 });
             }
