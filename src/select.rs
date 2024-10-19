@@ -24,9 +24,6 @@ impl Signal for SelectSignal {
     fn as_any(&self) -> &(dyn Any + 'static) {
         self
     }
-    fn as_ptr(&self) -> *const () {
-        self as *const _ as *const ()
-    }
 }
 
 trait Selection<'a, T> {
@@ -165,7 +162,7 @@ impl<'a, T> Selector<'a, T> {
                         .as_mut()
                         .unwrap()
                         .signals
-                        .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+                        .retain(|s| *s != hook);
                 }
             }
         }
@@ -255,7 +252,7 @@ impl<'a, T> Selector<'a, T> {
                     // Remove hook
                     self.receiver.0.lockable.lock().unwrap()
                         .recv_waiting
-                        .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+                        .retain(|s| *s != hook);
                     // If we were woken, but never polled, wake up another
                     if !self.received
                         && hook

@@ -66,6 +66,8 @@ struct SendWaiting<T> {
 }
 
 /// reference-counted struct of optional mutex-guarded message "slot" plus dyn-able notify signal
+///
+/// implements reference equality comparison
 struct Hook<T, S: ?Sized>(Arc<HookInner<T, S>>);
 
 /// see Hook
@@ -91,9 +93,15 @@ impl<T, S: Signal> Hook<T, S> {
     }
 }
 
-impl<T, S: ?Sized + Signal> Clone for Hook<T, S> {
+impl<T, S: ?Sized> Clone for Hook<T, S> {
     fn clone(&self) -> Self {
         Self(Arc::clone(&self.0))
+    }
+}
+
+impl<T1, T2, S1: ?Sized, S2: ?Sized> PartialEq<Hook<T2, S2>> for Hook<T1, S1> {
+    fn eq(&self, rhs: &Hook<T2, S2>) -> bool {
+        Arc::as_ptr(&self.0) as *const () == Arc::as_ptr(&rhs.0) as *const () 
     }
 }
 
@@ -300,7 +308,7 @@ impl<T> Shared<T> {
                             self.lockable.lock().unwrap().send_waiting
                                 .as_mut()
                                 .unwrap().signals
-                                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+                                .retain(|s| *s != hook);
                         }
                         hook.take().map(|msg| if self.is_disconnected() {
                             Err(TrySendTimeoutError::Disconnected(msg))
@@ -360,7 +368,7 @@ impl<T> Shared<T> {
                         if timed_out { // Remove our signal
                             let hook = hook.clone();
                             self.lockable.lock().unwrap().recv_waiting
-                                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+                                .retain(|s| *s != hook);
                         }
                         match hook.take() {
                             Some(msg) => Ok(msg),

@@ -37,7 +37,6 @@ impl Signal for AsyncSignal {
     }
 
     fn as_any(&self) -> &(dyn Any + 'static) { self }
-    fn as_ptr(&self) -> *const () { self as *const _ as *const () }
 }
 
 impl<T> Hook<T, AsyncSignal> {
@@ -158,7 +157,7 @@ impl<'a, T> SendFut<'a, T> {
             self.sender.0.lockable.lock().unwrap().send_waiting
                 .as_mut()
                 .unwrap().signals
-                .retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+                .retain(|s| *s != hook);
         }
     }
 
@@ -372,7 +371,7 @@ impl<'a, T> RecvFut<'a, T> {
         if let Some(hook) = self.hook.take() {
             let mut lockable = self.receiver.0.lockable.lock().unwrap();
             // We'd like to use `Arc::ptr_eq` here but it doesn't seem to work consistently with wide pointers?
-            lockable.recv_waiting.retain(|s| s.signal().as_ptr() != hook.signal().as_ptr());
+            lockable.recv_waiting.retain(|s| *s != hook);
             if hook.signal().as_any().downcast_ref::<AsyncSignal>().unwrap().woken.load(Ordering::SeqCst) {
                 // If this signal has been fired, but we're being dropped (and so not listening to it),
                 // pass the signal on to another receiver
